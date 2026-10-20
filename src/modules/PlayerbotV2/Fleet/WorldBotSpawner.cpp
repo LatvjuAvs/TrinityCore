@@ -272,6 +272,9 @@ void WorldBotSpawner::LoadConfig()
     c.pool_horde_pct   = std::clamp<uint32>(uint32(sConfigMgr->GetIntDefault("Playerbot.World.PoolHordePct", 50, true)), 5, 95);
     c.variable_max     = uint32(std::clamp<int64>(sConfigMgr->GetIntDefault("Playerbot.World.VariableMax", 2000, true), 0, 20000));
     c.variable_ttl_h   = uint32(std::clamp<int64>(sConfigMgr->GetIntDefault("Playerbot.World.VariableTtlHours", 24, true), 1, 24 * 90));
+    // Local (WoW Forever local server, M7 "living world"): every new resident is a level 1 character at its race's start, like a new
+    // player, and levels by questing. Off by default (upstream behaviour). See DriveSeed, FinishSpawn and BotSetupPipeline::DoPlaceAndTravel.
+    c.fresh_start      = sConfigMgr->GetBoolDefault("Playerbot.World.FreshStart", false, true);
     cfg_ = c;
 }
 
@@ -1140,6 +1143,13 @@ void WorldBotSpawner::DriveLeaving(uint32 now_ms, std::vector<Anchor> const& anc
     }
 }
 
+// Local (M7): with FreshStart only residents born at level 1 under it wake (distribution_level 1); the mid-level roster made before
+// stays asleep (it never did its earlier quests, so it cannot quest) and is kept, not deleted.
+std::string WorldBotSpawner::FreshClause() const
+{
+    return cfg_.fresh_start ? std::string("AND pv.distribution_level = 1 ") : std::string();
+}
+
 void WorldBotSpawner::WindowFor(Anchor const& a, uint8& lo, uint8& hi) const
 {
     // Zephras Isle: its own levels, below MinLevel. The island's bots are Skyborne questers; they are not lifted to 10, which
@@ -1223,9 +1233,9 @@ void WorldBotSpawner::DriveSpawn(uint32 now_ms, std::vector<Anchor> const& ancho
         queries_.AddCallback(CharacterDatabase.AsyncQuery(Trinity::StringFormat(
             "SELECT pv.character_guid_low, c.level, c.race, c.map, c.position_x, c.position_y, c.position_z FROM playerbot_v2_character pv "
             "JOIN characters c ON c.guid = pv.character_guid_low "
-            "WHERE c.level BETWEEN {} AND {} AND c.online = 0 AND pv.distribution_level > 0 {}"
+            "WHERE c.level BETWEEN {} AND {} AND c.online = 0 AND pv.distribution_level > 0 {}{}"
             "ORDER BY RAND() LIMIT {}",
-            uint32(lo), uint32(hi), SkyborneRaceClause(Skyborne::IsOnIsle(a.map)), std::max<uint32>(want * 20u, 100u)).c_str())
+            uint32(lo), uint32(hi), SkyborneRaceClause(Skyborne::IsOnIsle(a.map)), FreshClause(), std::max<uint32>(want * 20u, 100u)).c_str())
             .WithCallback([this, a, slots, slot_levels](QueryResult res)
         {
             query_inflight_ = false;
@@ -1606,6 +1616,23 @@ void WorldBotSpawner::DriveSeed(uint32 now_ms)
     // The census decides which faction and level bracket the roster lacks most; until it is read the seeder waits.
     if (!pool_counts_ms_)
         return;
+    // Fresh start: the roster grows by level 1 newcomers only, up to PoolMax in all, the faction the census lacks most.
+    if (cfg_.fresh_start)
+    {
+        if (pool_count_ >= int64(cfg_.pool_max))
+            return;
+        SeedChoice const fresh = PickSeed(pool_counts_, cfg_.pool_horde_pct, double(urand(0, 999999)) / 1000000.0, PoolBracketCap(cfg_.pool_max));
+        bool const fresh_alliance = fresh.deficit > 0 ? fresh.alliance : (urand(0, 99) >= cfg_.pool_horde_pct);
+        if (uint64 const guid = owner_.SpawnAmbientBot(1, fresh_alliance, uint8(0)))
+        {
+            seeding_[guid] = Seeding{ now_ms ? now_ms : 1u, 0 };
+            ++pool_count_;
+            PoolAdd(pool_counts_, fresh_alliance, 1);
+        }
+        else
+            ++n_spawn_failed_;
+        return;
+    }
     // Every (faction, level bracket) has a target of its own, 1-9 included; the roster is filled where it lacks most and never past a
     // bracket's cap, so the factions stay level and the 60s cannot crowd out the low levels.
     SeedChoice const want = PickSeed(pool_counts_, cfg_.pool_horde_pct, double(urand(0, 999999)) / 1000000.0, PoolBracketCap(cfg_.pool_max));
@@ -1635,10 +1662,10 @@ void WorldBotSpawner::DriveWake(uint32 now_ms, Anchor const& a, uint32 want)
         "SELECT pv.character_guid_low, c.level, c.race, c.map, c.position_x, c.position_y, c.zone, c.position_z FROM playerbot_v2_character pv "
         "JOIN characters c ON c.guid = pv.character_guid_low "
         "WHERE c.online = 0 AND pv.distribution_level > 0 AND c.map = {} AND c.level BETWEEN {} AND {} "
-        "AND c.position_x BETWEEN {:.1f} AND {:.1f} AND c.position_y BETWEEN {:.1f} AND {:.1f} {}{}"
+        "AND c.position_x BETWEEN {:.1f} AND {:.1f} AND c.position_y BETWEEN {:.1f} AND {:.1f} {}{}{}"
         "ORDER BY RAND() LIMIT {}",
         a.map, uint32(lo), uint32(hi), a.x - r, a.x + r, a.y - r, a.y + r,
-        SkyborneRaceClause(Skyborne::IsOnIsle(a.map)),
+        SkyborneRaceClause(Skyborne::IsOnIsle(a.map)), FreshClause(),
         town ? Trinity::StringFormat("AND c.zone = {} ", a.zone) : std::string(),   // a capital wakes its own zone only (WakeSelect.h)
         std::max<uint32>(want * 10u, 60u)).c_str())
         .WithCallback([this, a, want, town](QueryResult res)
@@ -1719,9 +1746,9 @@ void WorldBotSpawner::DriveGlobalSpawn(uint32 now_ms, std::vector<Anchor> const&
     queries_.AddCallback(CharacterDatabase.AsyncQuery(Trinity::StringFormat(
         "SELECT pv.character_guid_low, c.level, c.race, c.map, c.position_x, c.position_y, c.position_z FROM playerbot_v2_character pv "
         "JOIN characters c ON c.guid = pv.character_guid_low "
-        "WHERE c.level BETWEEN {} AND {} AND c.online = 0 AND pv.distribution_level > 0 {}"
+        "WHERE c.level BETWEEN {} AND {} AND c.online = 0 AND pv.distribution_level > 0 {}{}"
         "ORDER BY RAND() LIMIT {}",
-        cfg_.min_level, cfg_.max_level, SkyborneRaceClause(false), std::max<uint32>(want * 40u, 200u)).c_str())
+        cfg_.min_level, cfg_.max_level, SkyborneRaceClause(false), FreshClause(), std::max<uint32>(want * 40u, 200u)).c_str())
         .WithCallback([this, g, slots, slot_levels](QueryResult res)
     {
         query_inflight_ = false;
@@ -1788,6 +1815,9 @@ void WorldBotSpawner::FinishSpawn(Anchor const& a, std::vector<bool> const& slot
 
         // No pool bot of that faction at that level: create one (bounded by PoolMax).
         ++n_no_match_;
+        // Fresh start: never a ready-made bot of the wanted level; the roster grows by level 1 newcomers only (DriveSeed).
+        if (cfg_.fresh_start)
+            continue;
         // Around a Zephras anchor every new resident is Skyborne (the other races cannot leave their start for the isle's quests).
         // The island's residents are always temporary; anyone else goes to the core roster while it has room and, when it is full,
         // to the variable pool - so a new character meets bots of its own level whatever the core is made of (PoolBudget.h).

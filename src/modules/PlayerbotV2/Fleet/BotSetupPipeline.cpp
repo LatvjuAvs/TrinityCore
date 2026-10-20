@@ -1,6 +1,7 @@
 #include "BotSetupPipeline.h"
 #include "ClassicSpec.h"
 #include "StarterQuestAutocomplete.h"
+#include "Config.h"
 #include "BotPool.h"
 #include "SkyborneIsle.h"
 #include "../Util/SlowCall.h"
@@ -869,6 +870,15 @@ bool BotSetupPipeline::DoPlaceAndTravel(Player* bot)
         {
             TC_LOG_INFO("playerbot.v2",
                 "[BotSetupPipeline] Bot {} L{} (Skyborne) stays on Zephras Isle", bot->GetName(), uint32(level));
+            return true;
+        }
+        // Local (M7 fresh start, Playerbot.World.FreshStart): a low-level bot starts where character creation put it, its race's
+        // starting area, and quests from there like a new player; its homebind is that start too.
+        if (sConfigMgr->GetBoolDefault("Playerbot.World.FreshStart", false, true))
+        {
+            TC_LOG_INFO("playerbot.v2",
+                "[BotSetupPipeline] Bot {} L{} (fresh start) stays at its race start (map {} zone {})",
+                bot->GetName(), uint32(level), bot->GetMapId(), bot->GetZoneId());
             return true;
         }
         ::Playerbot::V2::World::CapitalEntry const& dest = CapitalForBot(bot);

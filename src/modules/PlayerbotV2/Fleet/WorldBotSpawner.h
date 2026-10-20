@@ -97,6 +97,7 @@ private:
         uint32 pool_horde_pct   = 50;      // share of the roster that should be Horde, in every level bracket (PoolBalance.h)
         uint32 variable_max     = 2000;    // temporary residents allowed to exist next to the core roster (PoolBudget.h); 0 = none
         uint32 variable_ttl_h   = 24;      // hours a temporary resident stays offline before it is deleted
+        bool   fresh_start      = false;   // local (M7): new residents start at level 1 where their race starts; no mid-level bots made on the spot
     };
 
     struct Anchor
@@ -152,6 +153,7 @@ private:
     void DriveCrowd(uint32 now_ms, std::vector<Anchor> const& anchors);
     // Level range of the bots around this anchor: its zone's, lifted to MinLevel, except on Zephras Isle (Fleet/SkyborneIsle.h).
     void WindowFor(Anchor const& a, uint8& lo, uint8& hi) const;
+    std::string FreshClause() const;   // local (M7): the wake-query filter of FreshStart
     bool PlaceNear(Player* bot, Player* anchor);
     void StepOffStack(Player* bot);
     uint32 CountAmbientNear(Anchor const& a) const;
