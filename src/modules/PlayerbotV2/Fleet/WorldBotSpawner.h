@@ -97,6 +97,7 @@ private:
         uint32 pool_horde_pct   = 50;      // share of the roster that should be Horde, in every level bracket (PoolBalance.h)
         uint32 variable_max     = 2000;    // temporary residents allowed to exist next to the core roster (PoolBudget.h); 0 = none
         uint32 variable_ttl_h   = 24;      // hours a temporary resident stays offline before it is deleted
+        bool   always_on        = false;   // local (M7): the world-wide population keeps living with no real player online
         bool   fresh_start      = false;   // local (M7): new residents start at level 1 where their race starts; no mid-level bots made on the spot
     };
 

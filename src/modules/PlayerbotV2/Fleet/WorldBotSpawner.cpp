@@ -275,6 +275,8 @@ void WorldBotSpawner::LoadConfig()
     // Local (WoW Forever local server, M7 "living world"): every new resident is a level 1 character at its race's start, like a new
     // player, and levels by questing. Off by default (upstream behaviour). See DriveSeed, FinishSpawn and BotSetupPipeline::DoPlaceAndTravel.
     c.fresh_start      = sConfigMgr->GetBoolDefault("Playerbot.World.FreshStart", false, true);
+    // Local (M7): with GlobalFill, keep the world-wide population awake and living while no real player is online (no orphans).
+    c.always_on        = sConfigMgr->GetBoolDefault("Playerbot.World.AlwaysOn", false, true);
     cfg_ = c;
 }
 
@@ -962,7 +964,8 @@ void WorldBotSpawner::DriveDespawn(uint32 now_ms, std::vector<Anchor> const& anc
             if (a.map == p->GetMapId())
                 nearest = std::min(nearest, Dist2D(p->GetPositionX(), p->GetPositionY(), a.x, a.y));
         if (nearest > cfg_.activity_radius) ++far_bots;
-        bool const orphan = nearest > cfg_.despawn_radius;
+        // AlwaysOn: with no real player online nobody is far from anyone, so no bot is an orphan (the world keeps living).
+        bool const orphan = (cfg_.always_on && anchors.empty()) ? false : nearest > cfg_.despawn_radius;
         // A bot behind the player (past ActivityRadius, inside DespawnRadius) can be recycled early when the world cap is full and a
         // player's bubble still lacks bots; otherwise only orphans go.
         if (!orphan && nearest <= cfg_.activity_radius)
@@ -1173,8 +1176,15 @@ void WorldBotSpawner::WindowFor(Anchor const& a, uint8& lo, uint8& hi) const
 
 void WorldBotSpawner::DriveSpawn(uint32 now_ms, std::vector<Anchor> const& anchors)
 {
-    if (anchors.empty() || query_inflight_)
+    if (query_inflight_)
         return;
+    if (anchors.empty())
+    {
+        // AlwaysOn: with nobody online there is no bubble, only the world-wide filler (DriveGlobalSpawn checks the budget).
+        if (cfg_.always_on && pool_count_ >= 0)
+            DriveGlobalSpawn(now_ms, anchors);
+        return;
+    }
     if (pool_count_ < 0)
         return;   // the pool size is not known yet
     if (ambient_online_ + pending_.size() >= cfg_.max_bots)
@@ -1722,7 +1732,7 @@ void WorldBotSpawner::DriveWake(uint32 now_ms, Anchor const& a, uint32 want)
 
 void WorldBotSpawner::DriveGlobalSpawn(uint32 now_ms, std::vector<Anchor> const& anchors)
 {
-    if (!cfg_.global_fill || anchors.empty() || query_inflight_ || rss_capped_)
+    if (!cfg_.global_fill || (anchors.empty() && !cfg_.always_on) || query_inflight_ || rss_capped_)
         return;
     // Keep room for the bubble around every player: the filler only uses the rest of the budget.
     uint32 const reserve = std::min<uint32>(uint32(anchors.size()) * cfg_.bots_per_player, cfg_.max_bots / 2);
@@ -1732,13 +1742,17 @@ void WorldBotSpawner::DriveGlobalSpawn(uint32 now_ms, std::vector<Anchor> const&
         return;
     uint32 const want = std::min(cfg_.global_per_tick, cap - used);
 
-    Anchor g = anchors.front();   // faction reference for FriendlyPct only
+    Anchor g = anchors.empty() ? Anchor{} : anchors.front();   // faction reference for FriendlyPct only
     g.guid = ObjectGuid::Empty;
     std::vector<bool>  slots;
     std::vector<uint8> slot_levels;
     for (uint32 i = 0; i < want; ++i)
     {
-        slots.push_back(urand(0, 99) < cfg_.friendly_pct ? g.alliance : !g.alliance);
+        // AlwaysOn with nobody online: the roster's own faction share decides (PoolHordePct).
+        if (anchors.empty())
+            slots.push_back(urand(0, 99) >= cfg_.pool_horde_pct);
+        else
+            slots.push_back(urand(0, 99) < cfg_.friendly_pct ? g.alliance : !g.alliance);
         slot_levels.push_back(uint8(urand(cfg_.min_level, cfg_.max_level)));
     }
     query_inflight_ = true;
