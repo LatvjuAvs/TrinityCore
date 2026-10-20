@@ -359,7 +359,10 @@ bool BotSetupPipeline::DoGrantStarterKit(Player* bot)
     const uint64 STARTER_GOLD_COPPER = ::Playerbot::IsVanillaRealm()
         ? uint64(bot->GetLevel()) * 25000ULL
         : 500ULL * 100ULL * 100ULL;  // 5,000,000c
-    if (bot->GetMoney() < STARTER_GOLD_COPPER)
+    // Local (M7, Playerbot.World.FreshStart): a level 1-9 newcomer starts like a new player, with the money and bags its
+    // character creation gave it (none), and earns the rest.
+    bool const fresh_newcomer = sConfigMgr->GetBoolDefault("Playerbot.World.FreshStart", false, true) && bot->GetLevel() < 10;
+    if (!fresh_newcomer && bot->GetMoney() < STARTER_GOLD_COPPER)
         bot->SetMoney(STARTER_GOLD_COPPER);
 
     // Faction reputation pre-seeding. A freshly-leveled distribution bot
@@ -404,7 +407,8 @@ bool BotSetupPipeline::DoGrantStarterKit(Player* bot)
 
     // Bags: ensure every bag slot carries a 30-slot bag (see EnsureBags — uses
     // EquipNewItem so it works even with a full backpack).
-    EnsureBags(bot);
+    if (!fresh_newcomer)
+        EnsureBags(bot);
     return true;
 }
 

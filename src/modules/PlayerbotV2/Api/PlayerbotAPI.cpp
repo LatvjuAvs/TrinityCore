@@ -8982,6 +8982,8 @@ Result API::trainer_buy_all_available(ObjectGuid trainer_npc,
     // spell only and the loop continues with the next.
     auto const& spells = trainer->GetSpells();
     bool any_learned = false;
+    uint64 const money_before = p_->GetMoney();   // local (M7): [earn_spells] purchase line below
+    uint32 learned_n = 0;
     for (auto const& s : spells)
     {
         if (p_->HasSpell(s.SpellId))
@@ -8993,10 +8995,14 @@ Result API::trainer_buy_all_available(ObjectGuid trainer_npc,
         if (p_->HasSpell(s.SpellId))
         {
             any_learned = true;
+            ++learned_n;
             if (out_learned) ++*out_learned;
         }
         else if (out_skipped) ++*out_skipped;
     }
+    if (any_learned)
+        TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} bought {} spell(s) from {} for {} copper ({} left)", p_->GetName(),
+            uint32(p_->GetLevel()), learned_n, npc->GetEntry(), money_before - p_->GetMoney(), p_->GetMoney());
     // "Nothing learned + nothing already known + nothing offered" is
     // unusual â surface as Ok (trainer simply has no spells for the bot).
     if (!any_learned && spells.empty()) return Result::Ok;

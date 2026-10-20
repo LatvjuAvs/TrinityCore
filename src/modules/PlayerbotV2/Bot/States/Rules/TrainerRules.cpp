@@ -13,6 +13,7 @@
 #include "Bot/BotIntent.h"
 #include "Bot/ClassTables.h"
 #include "GameTime.h"
+#include "Log.h"
 #include "UnitDefines.h"
 #include "Bot/World/ClassTrainerIndex.h"
 #include <cmath>
@@ -93,6 +94,8 @@ bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
     if (d2 <= kTrainerInteract * kTrainerInteract)
     {
         ai.clear_trainer_trip();   // arrived: idle:trainer takes over
+        TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} reached its class trainer after {} s", s.name(), uint32(s.level()),
+            (GameTime::GetGameTimeMS() - trip.since_ms) / 1000u);
         return false;
     }
     float const dist = std::sqrt(d2);
