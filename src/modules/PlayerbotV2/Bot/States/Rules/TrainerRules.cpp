@@ -14,6 +14,8 @@
 #include "Bot/ClassTables.h"
 #include "GameTime.h"
 #include "UnitDefines.h"
+#include "Bot/World/ClassTrainerIndex.h"
+#include <cmath>
 
 namespace Playerbot {
 
@@ -25,7 +27,8 @@ constexpr float kTrainerInteract = 5.0f;
 
 bool TrainerGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,uint32)
 {
-    if (s.gold() < kAutoTrainMinGold) return false;
+    // Local (M7): with EarnSpells a low-level bot's spells cost copper, so any money is enough to try.
+    if (s.gold() < (::Playerbot::World::EarnSpellsEnabled() ? 1 : kAutoTrainMinGold)) return false;
     auto const* trainer = s.nearest_npc_with_flag(UNIT_NPC_FLAG_TRAINER);
     if (!trainer) return false;
     float bx, by, bz; s.position(bx, by, bz);
@@ -60,6 +63,42 @@ bool TrainerFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,B
     ai.note_action_retry(BotAI::ActionKind::TrainerLearn,
                          trainer->guid.GetCounter(), now_ms);
     ai.set_last_rule_fired("idle:trainer");
+    return true;
+}
+
+// ---------- idle:class_trainer_trip ----------
+// Local (M7, Playerbot.Bot.EarnSpells): walk to the class trainer Module::OnLevelUp picked. Within 5 y the trip ends and
+// idle:trainer (priority 230, just below) buys what the bot can afford. Gives up after 20 minutes or on another map.
+constexpr uint32 kTripTimeoutMs = 20u * 60u * 1000u;
+
+bool ClassTrainerTripGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, uint32)
+{
+    BotAI::TrainerTrip const trip = ai.trainer_trip();
+    if (!trip.active) return false;
+    if (!s.is_alive() || s.in_combat() || s.is_casting()) return false;
+    if (trip.map != s.map_id() || GameTime::GetGameTimeMS() - trip.since_ms > kTripTimeoutMs)
+    {
+        ai.clear_trainer_trip();
+        return false;
+    }
+    return true;
+}
+
+bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, BotIntentEmitter& emit, uint32)
+{
+    BotAI::TrainerTrip const trip = ai.trainer_trip();
+    float bx, by, bz; s.position(bx, by, bz);
+    float const dx = trip.x - bx, dy = trip.y - by;
+    float const d2 = dx * dx + dy * dy;
+    if (d2 <= kTrainerInteract * kTrainerInteract)
+    {
+        ai.clear_trainer_trip();   // arrived: idle:trainer takes over
+        return false;
+    }
+    float const dist = std::sqrt(d2);
+    float const scale = (dist - 3.0f) / dist;   // stop inside the interact ring
+    emit.move_to(bx + dx * scale, by + dy * scale, trip.z, /*run*/ true);
+    ai.set_last_rule_fired("idle:class_trainer_trip");
     return true;
 }
 
@@ -104,6 +143,14 @@ bool DualSpecFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,
 
 void RegisterTrainerRules(IdleRuleRegistry& r)
 {
+    {
+        IdleRule rule;
+        rule.name     = "idle:class_trainer_trip";
+        rule.priority = 240;   // local (M7): just above idle:trainer, below quest work
+        rule.gate     = &ClassTrainerTripGate;
+        rule.fire     = &ClassTrainerTripFire;
+        r.register_rule(std::move(rule));
+    }
     {
         IdleRule rule;
         rule.name     = "idle:trainer";

@@ -10,6 +10,7 @@
 #include "Services.h"
 #include "Fleet/RaidSubgroupPlan.h"
 #include "Bot/BotRegistry.h"
+#include "Bot/World/ClassTrainerIndex.h"
 #include "Bot/BotSnapshot.h"
 #include "Bot/World/LearnFlightpaths.h"
 #include "Bot/BotSnapshotBuilder.h"
@@ -2805,7 +2806,23 @@ void Module::OnLevelUp(Player* p, uint8 new_level)
     ::Playerbot::API api(p);
     api.purge_foreign_class_spells();
     uint32 const quest_spells = api.learn_class_quest_spells_free();
-    uint32 const spells = api.learn_trainer_spells_free();
+    // Local (M7): with Playerbot.Bot.EarnSpells the bot buys its trainer spells like a player: no free spells here, a trip to the
+    // nearest class trainer of its class instead (idle:class_trainer_trip walks there, idle:trainer buys and pays).
+    uint32 spells = 0;
+    if (::Playerbot::World::EarnSpellsEnabled())
+    {
+        uint32 const learnable = ::Playerbot::World::CountLearnableTrainerSpells(p);
+        ::Playerbot::World::ClassTrainerSpot spot;
+        if (learnable && ::Playerbot::World::NearestClassTrainer(p, 1500.0f, spot))
+            if (BotAI* ai = Services::Registry().ai(p->GetGUID().GetCounter()))
+            {
+                ai->set_trainer_trip({ true, spot.map, spot.x, spot.y, spot.z, GameTime::GetGameTimeMS() });
+                TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{}: {} spell(s) to buy, trip to trainer {} ({:.0f} y)", p->GetName(),
+                    uint32(new_level), learnable, spot.creature_entry, p->GetExactDist2d(spot.x, spot.y));
+            }
+    }
+    else
+        spells = api.learn_trainer_spells_free();
     uint32 const weapon_skills = api.learn_weapon_skills_free();
     // Riding (vanilla: apprentice and the race's mount at 40, journeyman and the swift mount at 60). The call does nothing below 40 and
     // when the skill and mount are already there, so a level past 40 (or a jump over it) is safe to hand to it.

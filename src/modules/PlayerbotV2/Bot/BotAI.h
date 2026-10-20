@@ -451,6 +451,12 @@ public:
     // hesitation never ran out and it never accepted a quest.
     uint32 pending_companion_accept_at_ms() const { return pending_companion_accept_at_ms_; }
     void   set_pending_companion_accept_at_ms(uint32 v) { pending_companion_accept_at_ms_ = v; }
+    // Local (M7, Playerbot.Bot.EarnSpells): a trip to a class trainer to buy the spells of a new level. Set on the world thread
+    // (Module::OnLevelUp), read and cleared by idle:class_trainer_trip on the bot's worker, hence the lock.
+    struct TrainerTrip { bool active = false; uint32 map = 0; float x = 0.f, y = 0.f, z = 0.f; uint32 since_ms = 0; };
+    void set_trainer_trip(TrainerTrip const& t) { std::lock_guard<std::mutex> lk(trainer_trip_mtx_); trainer_trip_ = t; }
+    TrainerTrip trainer_trip() const { std::lock_guard<std::mutex> lk(trainer_trip_mtx_); return trainer_trip_; }
+    void clear_trainer_trip() { std::lock_guard<std::mutex> lk(trainer_trip_mtx_); trainer_trip_.active = false; }
     // Same for the companion turn-in rule versus idle:quest_turnin (both priority 702).
     uint32 pending_companion_turnin_at_ms() const { return pending_companion_turnin_at_ms_; }
     void   set_pending_companion_turnin_at_ms(uint32 v) { pending_companion_turnin_at_ms_ = v; }
@@ -3367,6 +3373,8 @@ private:
     uint32         pending_quest_accept_at_ms_ = 0;
     uint32         pending_companion_accept_at_ms_ = 0;
     uint32         pending_companion_turnin_at_ms_ = 0;
+    mutable std::mutex trainer_trip_mtx_;
+    TrainerTrip    trainer_trip_;
     uint32         pending_quest_turnin_at_ms_ = 0;
     // Vendor-open hesitation: real players stand at a vendor for 1–3s
     // (opening the window, scrolling, scanning for repair widget) before
