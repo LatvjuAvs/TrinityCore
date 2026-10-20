@@ -446,6 +446,14 @@ public:
     // Quest dialog hesitation slots.
     uint32 pending_quest_accept_at_ms() const { return pending_quest_accept_at_ms_; }
     void   set_pending_quest_accept_at_ms(uint32 v) { pending_quest_accept_at_ms_ = v; }
+    // The companion quest rules' own "read the quest" pause. It used to share pending_quest_accept_at_ms_ with idle:quest_accept
+    // (same priority 701): the companion gate reset it to 0 whenever a bot had no companion quest, every tick, so a world bot's
+    // hesitation never ran out and it never accepted a quest.
+    uint32 pending_companion_accept_at_ms() const { return pending_companion_accept_at_ms_; }
+    void   set_pending_companion_accept_at_ms(uint32 v) { pending_companion_accept_at_ms_ = v; }
+    // Same for the companion turn-in rule versus idle:quest_turnin (both priority 702).
+    uint32 pending_companion_turnin_at_ms() const { return pending_companion_turnin_at_ms_; }
+    void   set_pending_companion_turnin_at_ms(uint32 v) { pending_companion_turnin_at_ms_ = v; }
     uint32 pending_quest_turnin_at_ms() const { return pending_quest_turnin_at_ms_; }
     void   set_pending_quest_turnin_at_ms(uint32 v) { pending_quest_turnin_at_ms_ = v; }
 
@@ -3357,6 +3365,8 @@ private:
     // delay on a multi-quest hub doesn't bleed into the turn-in delay
     // afterwards.
     uint32         pending_quest_accept_at_ms_ = 0;
+    uint32         pending_companion_accept_at_ms_ = 0;
+    uint32         pending_companion_turnin_at_ms_ = 0;
     uint32         pending_quest_turnin_at_ms_ = 0;
     // Vendor-open hesitation: real players stand at a vendor for 1–3s
     // (opening the window, scrolling, scanning for repair widget) before

@@ -102,7 +102,7 @@ bool TurnInGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const& g,
     auto const& cq = s.raw().companion_quest;
     if (cq.turn_in.empty())
     {
-        if (ai.pending_quest_turnin_at_ms() != 0) ai.set_pending_quest_turnin_at_ms(0);
+        if (ai.pending_companion_turnin_at_ms() != 0) ai.set_pending_companion_turnin_at_ms(0);
         return false;
     }
     return CommonGate(s, g);
@@ -126,12 +126,12 @@ bool TurnInFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, B
             if (dsq < near_dsq) { near_dsq = dsq; near_x = gx; near_y = gy; near_z = gz; }
             continue;
         }
-        if (!PauseOver(s, ai.pending_quest_turnin_at_ms(), &BotAI::set_pending_quest_turnin_at_ms, ai))
+        if (!PauseOver(s, ai.pending_companion_turnin_at_ms(), &BotAI::set_pending_companion_turnin_at_ms, ai))
             return false;
         emit.face_target(a.giver);
         emit.complete_quest(a.giver, a.quest_id, /*reward_choice*/ 0xFF);   // 0xFF: best for the class
         ai.note_action_retry(BotAI::ActionKind::CompanionQuest, kTurnInKeyBit | a.quest_id, now_ms);
-        ai.set_pending_quest_turnin_at_ms(0);
+        ai.set_pending_companion_turnin_at_ms(0);
         ai.grant_detour(now_ms);
         ai.set_last_rule_fired("idle:companion_quest_turnin");
         TC_LOG_INFO("playerbot.v2", "[quest] {} turn_in {} {}{}", s.name(), a.quest_id,
@@ -153,7 +153,7 @@ bool AcceptGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const& g,
     auto const& cq = s.raw().companion_quest;
     if (cq.accept.empty())
     {
-        if (ai.pending_quest_accept_at_ms() != 0) ai.set_pending_quest_accept_at_ms(0);
+        if (ai.pending_companion_accept_at_ms() != 0) ai.set_pending_companion_accept_at_ms(0);
         return false;
     }
     // Full bags: a quest that hands out an item fails on accept and would re-pin the bot; free space first.
@@ -178,12 +178,12 @@ bool AcceptFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, B
             if (dsq < near_dsq) { near_dsq = dsq; near_x = gx; near_y = gy; near_z = gz; }
             continue;
         }
-        if (!PauseOver(s, ai.pending_quest_accept_at_ms(), &BotAI::set_pending_quest_accept_at_ms, ai))
+        if (!PauseOver(s, ai.pending_companion_accept_at_ms(), &BotAI::set_pending_companion_accept_at_ms, ai))
             return false;
         emit.face_target(a.giver);
         emit.accept_quest(a.giver, a.quest_id);
         ai.note_action_retry(BotAI::ActionKind::CompanionQuest, a.quest_id, now_ms);
-        ai.set_pending_quest_accept_at_ms(0);
+        ai.set_pending_companion_accept_at_ms(0);
         ai.grant_detour(now_ms);
         ai.set_last_rule_fired("idle:companion_quest_accept");
         TC_LOG_INFO("playerbot.v2", "[quest] {} accept {} {}{}", s.name(), a.quest_id,
