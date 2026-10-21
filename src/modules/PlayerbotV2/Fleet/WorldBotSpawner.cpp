@@ -1997,6 +1997,11 @@ void WorldBotSpawner::OnWorldTick(uint32 now_ms)
     std::vector<Anchor> anchors;
     CollectAnchors(anchors);
     anchors_ = uint32(anchors.size());
+    // Local (M7): AlwaysOn: the world lives on its own, a real player online changes nothing. Without this, a login turned the
+    // bubble on (50 bots logged out across the world, 39 placed around the player) and the leash stopped every bot from
+    // pursuing an objective far from him.
+    if (cfg_.always_on)
+        anchors.clear();
 
     // A player who went into an instance or jumped far (hearth, flight end) leaves a ghost anchor for ZoneGraceSec, so the
     // bots around the spot he left are not logged out and rebuilt on the way back.
