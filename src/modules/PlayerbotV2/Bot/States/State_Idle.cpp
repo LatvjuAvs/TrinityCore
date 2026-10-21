@@ -17157,6 +17157,13 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
                         return true;
                     }
                 }
+                // Local (M7): beyond 250 y a single full-route move gets an incomplete path and the bot stalls short, as
+                // idle:pursue_quest_goal found (2026-06-22); walk there in bounded chunks like that rule does (live
+                // 2026-10-21: 43 bots held "Rellian Greenspyre" complete, the Darnassus ender 1,700 y from Dolanaar, every
+                // path Incomplete after about 70 y, and the turn-in was blacklisted).
+                if (dist > 250.0f)
+                    return States::ChunkedWalkToward(s, ai, emit, best_ex, best_ey, best_ez, "idle:walk_to_quest_ender",
+                                                     s.published_at_ms());
                 // Full route to the ender — PathGenerator detours around obstacles.
                 emit.move_to(best_ex, best_ey, best_ez, /*run*/ true);
                 ai.set_last_rule_fired("idle:walk_to_quest_ender");
