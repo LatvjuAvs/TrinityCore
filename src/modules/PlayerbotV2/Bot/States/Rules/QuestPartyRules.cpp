@@ -11,6 +11,9 @@
 #include "Bot/States/MaintainHelpers.h"
 #include "Fleet/QuestParty.h"
 #include "GameTime.h"
+#include <mutex>
+#include <unordered_map>
+#include "Log.h"
 #include <cmath>
 #include <cstring>
 
@@ -67,8 +70,59 @@ bool PartyRegroupFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
 
 } // namespace
 
+namespace {
+// Local (M7): idle:stranded_hearth. A low-level bot with no quest objective while its hearthstone points to the other
+// continent has been carried away from its quests (charter signer pulls before 2026-10-21 20:23; the picker never chooses an
+// incomplete objective across continents, so [picker_none] Stalen stood in Teldrassil with only Dun Morogh quests). After
+// 2 minutes without an objective it hearths home, at most once per 30 minutes.
+std::mutex g_stranded_mtx;
+std::unordered_map<uint64, std::pair<uint32, uint32>> g_stranded;   // bot -> (no objective since ms, last hearth ms)
+
+bool StrandedHearthGate(BotSnapshotView const& s, BotAI&, GroupSnapshotView const&, uint32)
+{
+    if (s.level() >= 20 || s.in_combat() || s.is_casting() || s.raw().movement.is_mounted || s.has_owner_character()) return false;
+    if (s.in_group() || s.is_in_dungeon() || s.in_battleground() || s.is_in_instance() || s.on_transport()) return false;
+    uint32 const now = s.published_at_ms();
+    std::lock_guard<std::mutex> lk(g_stranded_mtx);
+    if (s.raw().quest_log.current_quest_id != 0 || s.raw().quest_log.quests.empty())
+    {
+        g_stranded.erase(s.bot_id());
+        return false;
+    }
+    if (!s.can_hearth() || s.homebind_map_id() == s.map_id()) return false;
+    auto& e = g_stranded[s.bot_id()];
+    if (e.first == 0) e.first = now ? now : 1u;
+    if (now - e.first < 2u * 60u * 1000u) return false;
+    return e.second == 0 || now - e.second > 30u * 60u * 1000u;
+}
+
+bool StrandedHearthFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, BotIntentEmitter& emit, uint32)
+{
+    if (!emit.hearth()) return false;
+    {
+        std::lock_guard<std::mutex> lk(g_stranded_mtx);
+        auto& e = g_stranded[s.bot_id()];
+        e.second = s.published_at_ms() ? s.published_at_ms() : 1u;
+        e.first = 0;
+    }
+    TC_LOG_INFO("playerbot.v2", "[stranded_hearth] {} L{} has no quest objective on map {} and hearths home to map {}",
+        s.name(), uint32(s.level()), s.map_id(), s.homebind_map_id());
+    ai.set_last_rule_fired("idle:stranded_hearth");
+    return true;
+}
+} // namespace
+
 void RegisterQuestPartyRules(IdleRuleRegistry& r)
 {
+    {
+        IdleRule hr;
+        hr.name     = "idle:stranded_hearth";
+        hr.priority = 699;   // just above idle:pursue_quest_goal (698), which has nothing to pursue here
+        hr.gate     = &StrandedHearthGate;
+        hr.fire     = &StrandedHearthFire;
+        hr.min_interval_ms = 5000;
+        r.register_rule(std::move(hr));
+    }
     IdleRule rule;
     rule.name     = "idle:party_regroup";
     rule.priority = 235;   // below the class trainer trip (240), above idle:trainer (230) and the quest work in autoact (50)
