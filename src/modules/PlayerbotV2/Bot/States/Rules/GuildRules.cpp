@@ -80,6 +80,14 @@ bool TravelToRegistrar(BotSnapshotView const& s, BotAI& ai, BotIntentEmitter& em
         pick = alliance ? &kRegistrars[0] : &kRegistrars[3];
     uint32 const map = pick->map;
     float const tx = pick->x, ty = pick->y, tz = pick->z;
+    // Up to 250 y on the same map: one pathed move straight there first, as for trainer trips (the travel planner's node
+    // graph can lead the wrong way; live 2026-10-21 Andorn walked out of Orgrimmar from 130 y away).
+    if (s.map_id() == map && best <= 250.0f
+        && (emit.move_to(tx, ty, tz, /*run*/ true) || emit.move_already_emitted(tx, ty, tz)))
+    {
+        ai.set_last_rule_fired("idle:guild_charter_drive:travel");
+        return true;
+    }
     if (States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, map, tx, ty, tz, /*quest_goal=*/false)
         || (s.map_id() == map && States::ChunkedWalkToward(s, ai, emit, tx, ty, tz, "idle:guild_charter_drive:travel", GameTime::GetGameTimeMS())))
     {
@@ -946,7 +954,9 @@ void RegisterGuildRules(IdleRuleRegistry& r)
         rule.fire     = &CharterDriveFire;
         // Charter FSM steps every few seconds; 2s throttle is below
         // the phase-transition cadence so progress isn't delayed.
-        rule.min_interval_ms = 2000;
+        // local (M7): no throttle. With 2 s the quest rules moved the founder between fires (Alivi walked to a quest
+        // 1,300 y away instead of Stormwind); the gate passes only the two active founders, so it is cheap.
+        rule.min_interval_ms = 0;
         r.register_rule(std::move(rule));
     }
     {
