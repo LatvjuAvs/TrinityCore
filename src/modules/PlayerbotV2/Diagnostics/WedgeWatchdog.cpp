@@ -1,3 +1,4 @@
+#include <unordered_map>
 #include "WedgeWatchdog.h"
 #include "PerfCounters.h"
 #include "Bot/BotAI.h"
@@ -422,14 +423,22 @@ void WedgeWatchdog::Tick(uint32 now_ms)
             wi.cat == WedgeCategory::GoalUnreachable ||
             wi.cat == WedgeCategory::CombatLoop ||
             (wi.cat == WedgeCategory::NoProgress && wi.objective_poi_invalid);
+        // Local (M7): the wedge onset does not reset when an objective is blacklisted, so the same episode blacklisted the
+        // next objective on every pass, one every 7 s, until the bot had none left (live 2026-10-21: Ulrich lost all 4
+        // Durotar quests in 21 s and stood with [picker_none]). Each new objective now gets a full window of its own.
+        static std::unordered_map<uint64, uint32> s_last_remediate_ms;   // same thread as m_reportedOnset
+        auto const lr_it = s_last_remediate_ms.find(uint64(id));
+        bool const window_since_last = lr_it == s_last_remediate_ms.end() || now_ms - lr_it->second >= remediate_ms;
         if (remediate_enabled && remediable_cat &&
-            wi.duration_ms >= remediate_ms)
+            wi.duration_ms >= remediate_ms && window_since_last)
         {
             uint32 rq = wi.wedge_quest_id, ro = wi.wedge_obj_id;
             if (rq != 0 && !ai.objective_blacklisted(rq, ro, now_ms))
             {
                 ai.blacklist_objective_now(rq, ro, now_ms);
                 ++m_remediationTotal;
+                if (s_last_remediate_ms.size() > 8192) s_last_remediate_ms.clear();
+                s_last_remediate_ms[uint64(id)] = now_ms;
                 TC_LOG_INFO("playerbot.v2",
                     "[wedge_remediate] bot={} cat={} dur={}s -> temp-blacklisted objective "
                     "quest={} obj={} 5min (picker repicks; quest resurfaces)",
