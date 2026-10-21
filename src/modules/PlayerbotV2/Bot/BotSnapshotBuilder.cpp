@@ -1,4 +1,5 @@
-﻿#include "BotSnapshotBuilder.h"
+﻿#include "Bot/World/StarterGate.h"   // local (M7)
+#include "BotSnapshotBuilder.h"
 #include "BotRegistry.h"
 #include "GroupControl.h"
 #include "Bot/SpellFamily.h"
@@ -7363,6 +7364,8 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 //  - Classic: grey for a solo bot (level-dependent, so not
                 //    cached as impossible; re-checked every snapshot for free).
                 if (QuestGreyForSoloBot(p, q)) continue;
+                //  - Local (M7, FreshStart): a newcomer below level 4 does not take the way out of its starter area yet.
+                if (::Playerbot::Local::StarterQuestTooEarly(p, q)) continue;
                 // Bot-side profession gate — diagnostic split-out. The actual
                 // skip decision is made by the shared BotCanStillTakeQuestForHub
                 // predicate below (which applies the SAME GetSkillValue==0 gate),
