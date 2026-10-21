@@ -19579,6 +19579,18 @@ bool Player::LoadFromDB(ObjectGuid guid, CharacterDatabaseQueryHolder const& hol
 
     _LoadCharacterBankTabSettings(holder.GetPreparedResult(PLAYER_LOGIN_QUERY_LOAD_BANK_TAB_SETTINGS));
 
+    // Forever (local, patch 0002): the account-secured backpack slots (+4) must exist before the inventory loads; set only in
+    // HandlePlayerLogin, every item in them was mailed at each login ("can't be loaded into inventory ... by reason 9").
+    {
+        bool secured = sConfigMgr->GetBoolDefault("Forever.AccountSecuredForAll", false);
+        if (!secured && GetSession())
+            if (QueryResult result = LoginDatabase.PQuery("SELECT COUNT(*) FROM battlenet_accounts WHERE id = {} AND authenticator_secret IS NOT NULL "
+                "AND authenticator_secret <> ''", GetSession()->GetBattlenetAccountId()))
+                secured = (*result)[0].GetUInt64() != 0;
+        if (secured)
+            SetAccountSecured(true);
+    }
+
     _LoadInventory(holder.GetPreparedResult(PLAYER_LOGIN_QUERY_LOAD_INVENTORY),
         holder.GetPreparedResult(PLAYER_LOGIN_QUERY_LOAD_ARTIFACTS),
         holder.GetPreparedResult(PLAYER_LOGIN_QUERY_LOAD_AZERITE),
