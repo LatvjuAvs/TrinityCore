@@ -5343,7 +5343,46 @@ Result API::sell_trash(ObjectGuid npc)
     for (Item* it : to_sell)
         p_->SellItemToVendor(it, it->GetCount());
 
-    return to_sell.empty() ? Result::InvalidTarget : Result::Ok;
+    // Local (M7, Playerbot.Bot.BuyBags): after selling, a bot with an empty bag slot buys the biggest bag this vendor sells that
+    // costs at most half its money, straight into the slot, as a new player does. FreshStart newcomers start without bags; a full
+    // 16-slot backpack had human bots walking into Stormwind to bank (idle:capital_bag_run fired 29,747 times in 4 hours).
+    bool bought_bag = false;
+    static bool const buy_bags = sConfigMgr->GetBoolDefault("Playerbot.Bot.BuyBags", false, true);
+    if (buy_bags)
+        if (VendorItemData const* vitems = vendor->GetVendorItems(); vitems && !vitems->Empty())
+            for (uint8 bag_slot = INVENTORY_SLOT_BAG_START; bag_slot < INVENTORY_SLOT_BAG_END; ++bag_slot)
+            {
+                if (p_->GetItemByPos(INVENTORY_SLOT_BAG_0, bag_slot))
+                    continue;
+                uint32 best_slot = vitems->GetItemCount(), best_size = 0;
+                uint64 best_price = 0;
+                for (uint32 i = 0; i < vitems->GetItemCount(); ++i)
+                {
+                    VendorItem const* vi = vitems->GetItem(i);
+                    ItemTemplate const* t = vi ? sObjectMgr->GetItemTemplate(vi->item) : nullptr;
+                    if (!t || t->GetClass() != ITEM_CLASS_CONTAINER || t->GetSubClass() != ITEM_SUBCLASS_CONTAINER || !t->GetContainerSlots())
+                        continue;
+                    uint64 const price = uint64(t->GetBuyPrice());
+                    if (price * 2 > p_->GetMoney() || p_->CanUseItem(t) != EQUIP_ERR_OK)
+                        continue;
+                    if (t->GetContainerSlots() > best_size)
+                    {
+                        best_size = t->GetContainerSlots();
+                        best_slot = i;
+                        best_price = price;
+                    }
+                }
+                if (best_slot >= vitems->GetItemCount())
+                    break;   // nothing affordable here; the next vendor visit tries again
+                uint32 const item = vitems->GetItem(best_slot)->item;
+                if (!p_->BuyItemFromVendorSlot(npc, best_slot, item, 1, INVENTORY_SLOT_BAG_0, bag_slot))
+                    break;
+                bought_bag = true;
+                TC_LOG_INFO("playerbot.v2", "[buy_bag] {} L{} bought a {}-slot bag ({}) for {} copper ({} left)", p_->GetName(),
+                    uint32(p_->GetLevel()), best_size, item, best_price, p_->GetMoney());
+            }
+
+    return to_sell.empty() && !bought_bag ? Result::InvalidTarget : Result::Ok;
 }
 
 // Frees bag slots with no vendor in reach, the way a player running with a group does it: the cheapest bag rot goes first (see
