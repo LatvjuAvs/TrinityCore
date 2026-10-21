@@ -125,12 +125,12 @@ void Build()
         idx.spells.size());
 }
 
+// Built once, at the first level-up; OnLevelUp runs on a map thread when MapUpdate.Threads > 1. Read-only afterwards.
 Index& Built()
 {
-    Index& idx = TheIndex();
-    if (!idx.built)
-        Build();
-    return idx;
+    static std::once_flag once;
+    std::call_once(once, [] { Build(); });
+    return TheIndex();
 }
 
 } // namespace

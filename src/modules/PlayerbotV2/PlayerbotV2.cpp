@@ -2939,12 +2939,13 @@ void LogPlayerDeath(Player* vp, Unit* killer, BotAI const* vai)
 // Local (WoW Forever local server, M7): death-loop rescue, Playerbot.World.DeathLoopRescue (default off). A world bot that dies
 // kDeathLoopCount times within kDeathLoopWindowMs (live 2026-10-21: a level 7 rogue died 610 times overnight at the Raven
 // Hill graveyard among level 20+ skeletons) is revived and sent home to its homebind, as a player would take the spirit
-// healer and hearth out. World thread only (OnDeath and OnWorldUpdate), so no lock.
+// healer and hearth out. OnDeath runs on a map thread when MapUpdate.Threads > 1, OnWorldUpdate on the world thread: one lock.
 namespace {
 constexpr uint32 kDeathLoopCount = 4;
 constexpr uint32 kDeathLoopWindowMs = 15u * 60u * 1000u;
 std::unordered_map<uint64, std::vector<uint32>> g_recent_deaths;
 std::unordered_map<uint64, uint32> g_rescue_pending;   // guid -> time the loop was detected
+std::mutex g_rescue_mtx;
 
 bool DeathLoopRescueEnabled() { return sConfigMgr->GetBoolDefault("Playerbot.World.DeathLoopRescue", false, true); }
 
@@ -2955,6 +2956,7 @@ void NoteBotDeathForRescue(Player* vp)
     if (!DeathLoopRescueEnabled() || (vp->GetGroup() && !::Playerbot::V2::QuestParty::IsMember(guid))) return;
     if (Services::Owners().GetOwner(guid).account_id != 0) return;   // a player's companion: its owner handles it
     uint32 const now = GameTime::GetGameTimeMS();
+    std::lock_guard lk(g_rescue_mtx);
     std::vector<uint32>& d = g_recent_deaths[guid];
     d.push_back(now);
     std::erase_if(d, [now](uint32 t) { return now - t > kDeathLoopWindowMs; });
@@ -2967,6 +2969,7 @@ void NoteBotDeathForRescue(Player* vp)
 
 void DriveDeathLoopRescues()
 {
+    std::lock_guard lk(g_rescue_mtx);
     for (auto it = g_rescue_pending.begin(); it != g_rescue_pending.end();)
     {
         Player* bot = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(it->first));
