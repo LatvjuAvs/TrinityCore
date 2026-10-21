@@ -11,6 +11,7 @@
 #include "Fleet/RaidSubgroupPlan.h"
 #include "Bot/BotRegistry.h"
 #include "Bot/World/ClassTrainerIndex.h"
+#include "Bot/World/StarterGate.h"
 #include "Bot/BotSnapshot.h"
 #include "Bot/World/LearnFlightpaths.h"
 #include "Bot/BotSnapshotBuilder.h"
@@ -1102,6 +1103,7 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
             last_hint_check = total;
             DriveDeathLoopRescues();   // local (M7)
             ::Playerbot::World::DriveRemoteTraining();   // local (M7)
+            ::Playerbot::Local::RefreshFleetStuckQuests(GameTime::GetGameTimeMS());   // local (M7)
             ::Playerbot::V2::QuestParty::Drive(GameTime::GetGameTimeMS());   // local (M7)
             SendDueAddonHints();
         }

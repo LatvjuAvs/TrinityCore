@@ -9,6 +9,7 @@
 #include "IdleWatch.h"
 #include "WalkOrder.h"
 #include "Travel/ReachMemory.h"
+#include "Bot/World/StarterGate.h"   // local (M7): FleetStuckQuest
 #include "BotTypes.h"
 #include "Util/AtomicSharedPtr.h"
 #include "BotSnapshot.h"  // CurrencyEntry — cached_currencies_ member needs full type
@@ -2034,8 +2035,10 @@ public:
         std::lock_guard<std::mutex> lk(quest_mem_mtx_);
         auto const it = quest_blacklist_until_ms_.find(quest_id);
         if (it == quest_blacklist_until_ms_.end())
-            // Not this bot's own drop: other bots may have given up on the walk to its goal (Travel/ReachMemory.h).
-            return ::Playerbot::V2::Travel::QuestGoalMemory::Instance().KnownUnreachable(quest_id, now_ms);
+            // Not this bot's own drop: other bots may have given up on the walk to its goal (Travel/ReachMemory.h), or the
+            // fleet almost never finishes it (local M7, Bot/World/StarterGate.h).
+            return ::Playerbot::V2::Travel::QuestGoalMemory::Instance().KnownUnreachable(quest_id, now_ms) ||
+                   ::Playerbot::Local::FleetStuckQuest(quest_id);
         return now_ms < it->second;
     }
     // Drop expired entries. Called periodically from State_Idle (every ~5min)

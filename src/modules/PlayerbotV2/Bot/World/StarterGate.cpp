@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <mutex>
+#include <shared_mutex>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -81,6 +83,48 @@ bool QuestTooHardForBot(Player const* bot, Quest const* quest)
         return false;
     int32 const ql = bot->GetQuestLevel(quest);
     return ql > 0 && ql > int32(bot->GetLevel()) + margin + (bot->GetGroup() ? 2 : 0);
+}
+
+namespace {
+std::shared_mutex g_stuck_mtx;
+std::unordered_set<uint32> g_stuck;
+uint32 g_stuck_refreshed_ms = 0;
+}
+
+bool FleetStuckQuest(uint32 quest_id)
+{
+    std::shared_lock<std::shared_mutex> lk(g_stuck_mtx);
+    return g_stuck.contains(quest_id);
+}
+
+void RefreshFleetStuckQuests(uint32 now_ms)
+{
+    static bool const enabled = sConfigMgr->GetBoolDefault("Playerbot.World.SkipFleetStuckQuests", true, true);
+    if (!enabled || (g_stuck_refreshed_ms && now_ms - g_stuck_refreshed_ms < 10u * 60u * 1000u))
+        return;
+    g_stuck_refreshed_ms = now_ms ? now_ms : 1u;
+    QueryResult r = CharacterDatabase.Query(
+        "SELECT q.quest, COUNT(*) AS holders, "
+        "(SELECT COUNT(*) FROM character_queststatus_rewarded rw JOIN playerbot_v2_character pr ON pr.character_guid_low = rw.guid "
+        " WHERE rw.quest = q.quest) AS rewarded "
+        "FROM character_queststatus q JOIN playerbot_v2_character pv ON pv.character_guid_low = q.guid "
+        "GROUP BY q.quest HAVING holders >= 30 AND rewarded * 20 < holders");
+    std::unordered_set<uint32> fresh;
+    std::string list;
+    if (r)
+        do
+        {
+            Field* f = r->Fetch();
+            fresh.insert(f[0].GetUInt32());
+            if (list.size() < 400)
+                list += fmt::format("{}({}/{}) ", f[0].GetUInt32(), f[2].GetUInt64(), f[1].GetUInt64());
+        } while (r->NextRow());
+    size_t const n = fresh.size();
+    {
+        std::unique_lock<std::shared_mutex> lk(g_stuck_mtx);
+        g_stuck.swap(fresh);
+    }
+    TC_LOG_INFO("playerbot.v2", "[fleet_stuck_quests] {} quests skipped by bots (quest(turned in/holders)): {}", n, list);
 }
 
 } // namespace Playerbot::Local
