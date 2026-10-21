@@ -784,6 +784,7 @@ void DispatchInGroup(BotAI& ai,
     if (snapshot.victim().IsEmpty())
     {
         ObjectGuid assist_target;
+        char const* assist_src = "-";   // local diagnostics: which branch picked the target ([assist_why])
         // Owner-pinned focus target wins over everything. /focus <name>
         // sets ai.focus_target() so the owner can micromanage which add the
         // bot prioritizes (kicks, dispels, spike damage). Cleared via
@@ -791,10 +792,10 @@ void DispatchInGroup(BotAI& ai,
         if (ObjectGuid focus = ai.focus_target(); !focus.IsEmpty())
         {
             for (auto const& u : snapshot.raw().combat.nearby_enemies)
-                if (u.guid == focus && u.hp > 0) { assist_target = focus; break; }
+                if (u.guid == focus && u.hp > 0) { assist_target = focus; assist_src = "focus"; break; }
             if (assist_target.IsEmpty())
                 for (auto const& u : snapshot.raw().combat.attackers)
-                    if (u.guid == focus && u.hp > 0) { assist_target = focus; break; }
+                    if (u.guid == focus && u.hp > 0) { assist_target = focus; assist_src = "focus_attacker"; break; }
         }
         // Skull mark wins for everyone (after focus). Only use it if it's
         // actually nearby — out-of-vision skulls are stale.
@@ -837,12 +838,12 @@ void DispatchInGroup(BotAI& ai,
                             // MarksNeedOrder: an idle skull is a plan, the owner's order starts the pull.
                             if (u.unit_in_combat || !u.victim.IsEmpty() ||
                                 (!group.leader_is_bot() && MarkGate::MayEngage(snapshot, ai, &group, skull, &u)))
-                                assist_target = skull;
+                                assist_target = skull; assist_src = "skull";
                             break;
                         }
                     if (assist_target.IsEmpty())
                         for (auto const& u : snapshot.raw().combat.attackers)
-                            if (u.guid == skull && u.hp > 0) { assist_target = skull; break; }
+                            if (u.guid == skull && u.hp > 0) { assist_target = skull; assist_src = "skull_scan"; break; }
                 }
             }
         }
@@ -856,7 +857,7 @@ void DispatchInGroup(BotAI& ai,
             auto const& kf = snapshot.raw().pve_order;
             if (kf.active && !kf.kill_focus.IsEmpty())
                 for (auto const& u : snapshot.raw().combat.nearby_enemies)
-                    if (u.guid == kf.kill_focus && u.hp > 0) { assist_target = kf.kill_focus; break; }
+                    if (u.guid == kf.kill_focus && u.hp > 0) { assist_target = kf.kill_focus; assist_src = "kill_focus"; break; }
         }
         // Non-tanks fall back to leader's / any in-combat member's victim.
         // The copied guid MUST resolve against our own hostile lists
@@ -898,7 +899,7 @@ void DispatchInGroup(BotAI& ai,
                 {
                     if (u.guid != leader_member->victim || u.hp <= 0) continue;
                     float const lx = u.x - leader_member->x, ly = u.y - leader_member->y;
-                    if (lx * lx + ly * ly <= 25.f * 25.f) assist_target = u.guid;
+                    if (lx * lx + ly * ly <= 25.f * 25.f) assist_target = u.guid; assist_src = "owner_target";
                     break;
                 }
             }
@@ -906,11 +907,11 @@ void DispatchInGroup(BotAI& ai,
             // copying it set the stray bots fighting each other's mobs in Eastvale while the raid lay dead in Onyxia's Lair, so a member of
             // the group stayed in combat and the owner could not release (n58 live 2026-10-15 11:28, Amastorion).
             else if (leader_member->map_id == snapshot.map_id() && resolves_hostile(leader_member->victim))
-                assist_target = leader_member->victim;
+                assist_target = leader_member->victim; assist_src = "leader_victim";
             if (assist_target.IsEmpty() && !window_limited)
                 for (auto const& m : *members)
                     if (m.online && m.map_id == snapshot.map_id() && m.in_combat && resolves_hostile(m.victim))
-                    { assist_target = m.victim; break; }
+                    { assist_target = m.victim; assist_src = "member_victim"; break; }
         }
         // Defend-member engage (ALL roles, tanks very much included): a mob
         // whose victim is a group member is a pull in progress even when NO
@@ -967,7 +968,7 @@ void DispatchInGroup(BotAI& ai,
                 if (spare_duty_tank && u.victim != snapshot.raw().guid) continue;
                 const float ddx = u.x - sx, ddy = u.y - sy, ddz = u.z - sz;
                 const float dsq = ddx*ddx + ddy*ddy + ddz*ddz;
-                if (dsq < best_dsq) { best_dsq = dsq; assist_target = u.guid; }
+                if (dsq < best_dsq) { best_dsq = dsq; assist_target = u.guid; assist_src = "defend_member"; }
             }
         }
         // Defending stands a bot up (playtest, Deadmines 2026-10-15: "the mage is getting attacked and the other three guys are just
@@ -1005,7 +1006,7 @@ void DispatchInGroup(BotAI& ai,
                 if (u.hp <= 0 || !u.in_los || u.no_xp_kill || u.is_pacified || u.untargetable) continue;
                 const float ox = u.x - leader_member->x, oy = u.y - leader_member->y;
                 const float d2 = ox * ox + oy * oy;
-                if (d2 <= kR2 && d2 < best_dsq) { best_dsq = d2; assist_target = u.guid; }
+                if (d2 <= kR2 && d2 < best_dsq) { best_dsq = d2; assist_target = u.guid; assist_src = "aggressive"; }
             }
             aggressive_pick = !assist_target.IsEmpty() && !snapshot.is_in_raid();
         }
@@ -1029,8 +1030,8 @@ void DispatchInGroup(BotAI& ai,
                 float ax = 0.f, ay = 0.f, az = 0.f; snapshot.position(ax, ay, az);
                 float const ad = au ? std::sqrt((au->x - ax) * (au->x - ax) + (au->y - ay) * (au->y - ay)) : -1.f;
                 TC_LOG_INFO("playerbot.v2",
-                    "[assist_why] {} opens on entry {} ({:.0f}y): stance {} passive_now {} order_window {} follow_order {} mob in_combat {} mob_victim_kind {} tank_threat {}",
-                    snapshot.name(), au ? au->entry : 0u, ad, int(ai.owner_stance()), owner_passive ? 1 : 0,
+                    "[assist_why] {} opens on entry {} ({:.0f}y) via {}: stance {} passive_now {} order_window {} follow_order {} mob in_combat {} mob_victim_kind {} tank_threat {}",
+                    snapshot.name(), au ? au->entry : 0u, ad, assist_src, int(ai.owner_stance()), owner_passive ? 1 : 0,
                     ai.owner_order_window_open() ? 1 : 0, ai.owner_follow_order() ? 1 : 0, au && au->unit_in_combat ? 1 : 0,
                     au ? int(au->victim_kind) : -1, au ? au->tank_threat : -1);
             }

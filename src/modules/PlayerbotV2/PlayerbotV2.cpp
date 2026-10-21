@@ -1101,6 +1101,7 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
         {
             last_hint_check = total;
             DriveDeathLoopRescues();   // local (M7)
+            ::Playerbot::World::DriveRemoteTraining();   // local (M7)
             ::Playerbot::V2::QuestParty::Drive(GameTime::GetGameTimeMS());   // local (M7)
             SendDueAddonHints();
         }

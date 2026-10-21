@@ -6,6 +6,10 @@
 #include "Player.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "ObjectAccessor.h"
+#include "ObjectMgr.h"
+#include "Trainer.h"
+#include <mutex>
 #include <algorithm>
 #include <array>
 #include <unordered_map>
@@ -108,6 +112,7 @@ void Build()
             spot.y = f[2].GetFloat();
             spot.z = f[3].GetFloat();
             spot.creature_entry = f[4].GetUInt32();
+            spot.trainer_id = f[6].GetUInt32();
             idx.faction[spot.creature_entry] = f[5].GetUInt16();
             idx.spots[it->second].push_back(spot);
         } while (r->NextRow());
@@ -183,6 +188,64 @@ bool NearestClassTrainer(Player* bot, float max_dist, ClassTrainerSpot& out)
         }
     }
     return found;
+}
+
+namespace {
+std::mutex g_remote_mtx;
+std::vector<uint64> g_remote;
+}
+
+void QueueRemoteTraining(uint64 bot_low)
+{
+    std::lock_guard lk(g_remote_mtx);
+    g_remote.push_back(bot_low);
+}
+
+void DriveRemoteTraining()
+{
+    std::vector<uint64> todo;
+    {
+        std::lock_guard lk(g_remote_mtx);
+        todo.swap(g_remote);
+    }
+    for (uint64 low : todo)
+    {
+        Player* bot = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(low));
+        if (!bot || !bot->IsInWorld())
+            continue;
+        ClassTrainerSpot spot;
+        if (!NearestClassTrainer(bot, 5000.0f, spot))
+            continue;
+        Trainer::Trainer const* trainer = sObjectMgr->GetTrainer(spot.trainer_id);
+        if (!trainer)
+            continue;
+        std::vector<Trainer::Spell const*> can;
+        for (Trainer::Spell const& sp : trainer->GetSpells())
+        {
+            if (sp.ReqSkillLine || sp.ReqLevel > bot->GetLevel() || bot->HasSpell(sp.SpellId) || !bot->IsSpellFitByClassAndRace(sp.SpellId))
+                continue;
+            if (std::ranges::any_of(sp.ReqAbility, [bot](uint32 a) { return a && !bot->HasSpell(a); }))
+                continue;
+            can.push_back(&sp);
+        }
+        std::ranges::sort(can, {}, [](Trainer::Spell const* sp) { return sp->MoneyCost; });
+        uint32 learned = 0;
+        uint64 paid = 0;
+        for (Trainer::Spell const* sp : can)
+        {
+            if (!bot->HasEnoughMoney(int64(sp->MoneyCost)))
+                break;
+            bot->ModifyMoney(-int64(sp->MoneyCost));
+            if (sp->IsCastable())
+                bot->CastSpell(bot, sp->SpellId, true);
+            else
+                bot->LearnSpell(sp->SpellId, false);
+            ++learned;
+            paid += sp->MoneyCost;
+        }
+        TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} could not reach trainer {}: bought {} of {} spell(s) for {} copper ({} left)",
+            bot->GetName(), uint32(bot->GetLevel()), spot.creature_entry, learned, can.size(), paid, bot->GetMoney());
+    }
 }
 
 } // namespace Playerbot::World

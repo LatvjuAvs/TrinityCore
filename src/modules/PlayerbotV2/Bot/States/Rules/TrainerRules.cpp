@@ -75,6 +75,29 @@ bool TrainerFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,B
 // idle:trainer (priority 230, just below) buys what the bot can afford. Gives up after 20 minutes or on another map.
 constexpr uint32 kTripTimeoutMs = 20u * 60u * 1000u;
 
+// A trip that gets no 15 y closer in 4 minutes is stuck (a cave or an upper floor the paths do not reach, live 2026-10-21:
+// Valley of Trials den, Northshire Abbey, Anvilmar); it ends and the bot buys from afar (World::QueueRemoteTraining).
+constexpr uint32 kTripStallMs = 4u * 60u * 1000u;
+constexpr float  kTripProgressYd = 15.0f;
+
+bool TripStalled(BotSnapshotView const& s, BotAI::TrainerTrip const& trip, float dist)
+{
+    struct Progress { uint32 since = 0; float best = 0.f; uint32 best_ms = 0; };
+    static std::mutex mtx;
+    static std::unordered_map<uint64, Progress> prog;
+    uint32 const now = GameTime::GetGameTimeMS();
+    std::lock_guard lk(mtx);
+    Progress& p = prog[s.bot_id()];
+    if (p.since != trip.since_ms || dist < p.best - kTripProgressYd)
+    {
+        p.since = trip.since_ms;
+        p.best = dist;
+        p.best_ms = now;
+        return false;
+    }
+    return now - p.best_ms >= kTripStallMs;
+}
+
 // Once a minute per bot: where the trip stands and what the rule did (diagnosis of trips that never arrive).
 void TripTrace(BotSnapshotView const& s, BotAI::TrainerTrip const& trip, float dist, char const* branch, bool ok)
 {
@@ -103,6 +126,7 @@ bool ClassTrainerTripGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
         ai.clear_trainer_trip();
         TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} trip to its class trainer ended without arriving ({})", s.name(),
             uint32(s.level()), trip.map != s.map_id() ? "left the map" : "timeout");
+        ::Playerbot::World::QueueRemoteTraining(s.bot_id());
         return false;
     }
     return true;
@@ -136,6 +160,14 @@ bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
     // chunked walk as the last resort. A failed tick does not end the trip; the 20 minute timeout does.
     uint32 const now_ms = GameTime::GetGameTimeMS();
     float const dist = std::sqrt(d2);
+    if (TripStalled(s, trip, dist))
+    {
+        ai.clear_trainer_trip();
+        ::Playerbot::World::QueueRemoteTraining(s.bot_id());
+        TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} trip stuck {:.0f} y from its class trainer after {} s, buys from afar", s.name(),
+            uint32(s.level()), dist, (now_ms - trip.since_ms) / 1000u);
+        return false;
+    }
     if (dist <= 30.0f)
     {
         if (emit.move_to(trip.x, trip.y, trip.z, /*run*/ true) || emit.move_already_emitted(trip.x, trip.y, trip.z))
