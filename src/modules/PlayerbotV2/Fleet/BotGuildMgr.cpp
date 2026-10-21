@@ -368,8 +368,18 @@ bool BotGuildMgr::AdoptHeldCharter(Faction f)
         }
         if (BotAI* ai = Services::Registry().ai(owner_low))
             ai->arm_charter_grace(getMSTime());
+        uint32 const have = ActiveFounderSignatureCount(f);
         TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] Adopted the charter '{}' held by {} (guid_low={}, faction={}, {} signatures)",
-            name, owner->GetName(), owner_low, static_cast<uint32>(f), ActiveFounderSignatureCount(f));
+            name, owner->GetName(), owner_low, static_cast<uint32>(f), have);
+        // A charter that only needs turning in goes to the guild master plaza, as upstream sends an elected founder: the walk
+        // restarts after every restart (live 2026-10-21: Pandoris held 5 signatures for 2 hours, walking from Durotar by way
+        // of the Crossroads flight, and never arrived).
+        if (have >= uint32(sConfigMgr->GetIntDefault("MinPetitionSigns", 4, true)) && !owner->IsInCombat())
+        {
+            auto const spot = (f == FACTION_ALLIANCE) ? kPetitionerAlliance : kPetitionerHorde;
+            Playerbot::BotMovement::SafeTeleport(owner, WorldLocation(spot.map_id, Position(spot.x, spot.y, spot.z, 0.f)), 0);
+            TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] {} has all signatures: brought to the guild master plaza", owner->GetName());
+        }
         return true;
     } while (held->NextRow());
     return false;
