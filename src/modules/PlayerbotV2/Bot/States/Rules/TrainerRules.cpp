@@ -94,27 +94,37 @@ bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
     float bx, by, bz; s.position(bx, by, bz);
     float const dx = trip.x - bx, dy = trip.y - by;
     float const d2 = dx * dx + dy * dy;
-    if (d2 <= kTrainerInteract * kTrainerInteract)
+    // Arrived at the spot, or already within reach of the trainer standing a little off his spawn point (a trainer within
+    // 15 y of the spot; a profession trainer passed on the way stays far from it).
+    bool near_trainer = false;
+    if (auto const* tr = s.nearest_npc_with_flag(UNIT_NPC_FLAG_TRAINER))
+    {
+        float const tx = tr->x - bx, ty = tr->y - by, tz = tr->z - bz;
+        float const sx = tr->x - trip.x, sy = tr->y - trip.y;
+        near_trainer = tx * tx + ty * ty + tz * tz <= kTrainerInteract * kTrainerInteract && sx * sx + sy * sy <= 15.0f * 15.0f;
+    }
+    if (d2 <= kTrainerInteract * kTrainerInteract || near_trainer)
     {
         ai.clear_trainer_trip();   // arrived: idle:trainer takes over
         TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} reached its class trainer after {} s", s.name(), uint32(s.level()),
             (GameTime::GetGameTimeMS() - trip.since_ms) / 1000u);
         return false;
     }
-    // Close by (the trainer's room): one short direct step into the interact ring; ChunkedWalkToward stops 9 y out.
-    // Farther: like the RPG trips (RpgRules.cpp), the travel planner beyond 250 y and a chunked walk below. A single long
-    // move_to is refused by the path API (Locked). A failed tick does not end the trip; the 20 minute timeout does.
+    // Close by (the trainer's room): a pathed move onto the trainer's own spot, so the navmesh stops the bot as close as the
+    // room allows (a point 3 y short of him can sit behind a counter or a wall). Farther: the travel planner, whose legs up to
+    // 250 y are pathed moves too (a straight chunk walks off a cliff or into a cave wall: Coldridge, Valley of Trials), then the
+    // chunked walk as the last resort. A failed tick does not end the trip; the 20 minute timeout does.
     uint32 const now_ms = GameTime::GetGameTimeMS();
     float const dist = std::sqrt(d2);
     if (dist <= 30.0f)
     {
-        float const scale = (dist - 3.0f) / dist;
-        emit.move_to(bx + dx * scale, by + dy * scale, trip.z, /*run*/ true);
-        ai.set_last_rule_fired("idle:class_trainer_trip");
-        return true;
+        if (emit.move_to(trip.x, trip.y, trip.z, /*run*/ true) || emit.move_already_emitted(trip.x, trip.y, trip.z))
+        {
+            ai.set_last_rule_fired("idle:class_trainer_trip");
+            return true;
+        }
     }
-    if (dist > 250.0f
-        && States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, trip.map, trip.x, trip.y, trip.z, /*quest_goal=*/false))
+    else if (States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, trip.map, trip.x, trip.y, trip.z, /*quest_goal=*/false))
     {
         ai.set_last_rule_fired("idle:class_trainer_trip");
         return true;
