@@ -173,8 +173,11 @@ bool DualSpecFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,
 
 } // anonymous namespace
 
+void RegisterQuestPartyRules(IdleRuleRegistry& r);   // local (M7), QuestPartyRules.cpp
+
 void RegisterTrainerRules(IdleRuleRegistry& r)
 {
+    RegisterQuestPartyRules(r);
     {
         IdleRule rule;
         rule.name     = "idle:class_trainer_trip";

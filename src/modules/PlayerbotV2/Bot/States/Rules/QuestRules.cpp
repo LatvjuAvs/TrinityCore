@@ -2,6 +2,7 @@
 // accept, world-quest turnin, and quest-abandon-overlevel idle rules out
 // of the State_Idle linear cascade.
 
+#include "Fleet/QuestParty.h"   // local (M7)
 #include "Bot/IdleRule.h"
 #include "Group/GroupSnapshot.h"
 #include "Bot/BotAI.h"
@@ -499,7 +500,7 @@ bool QuestAbandonOverlevelFire(BotSnapshotView const& s, BotAI& ai, GroupSnapsho
 // walk toward the closest one — getting the bot into a populated
 // area where the snapshot's quest_offers will start surfacing.
 bool WalkToKnownHubGate(BotSnapshotView const& s, BotAI& ai,
-                        GroupSnapshotView const&, uint32 /*now_ms*/)
+                        GroupSnapshotView const& g, uint32 /*now_ms*/)
 {
     (void)ai;
     // NOTE: mounted bots may STILL seek a hub — mounted travel is the faster,
@@ -513,8 +514,9 @@ bool WalkToKnownHubGate(BotSnapshotView const& s, BotAI& ai,
     // (Bag-full handling lives in idle:bags_full_recover@710, which preempts.)
     // FIX 6 (group/owner exclusion): never pull a grouped bot toward a hub —
     // covers owner-following bots (owner's group) and all-bot groups alike.
-    // Solo autonomous bots (ungrouped) still relocate.
-    if (s.in_group()) return false;
+    // Solo autonomous bots (ungrouped) still relocate. Local (M7): so does the leader of a quest party (Fleet/QuestParty.h),
+    // its members follow it (idle:party_regroup).
+    if (s.in_group() && !(V2::QuestParty::IsMember(s.bot_id()) && g.leader() == s.raw().guid)) return false;
     // Now that this rule sits at 700 (above the OOC maintenance band) it must
     // yield to a genuinely hurt bot so it heals before trekking. OOC heal is
     // benign to defer for a healthy-ish bot, but a <50% bot should not walk

@@ -82,6 +82,7 @@
 #include <fmt/format.h>
 
 #include "Bot/States/MaintainHelpers.h"
+#include "Fleet/QuestParty.h"   // local (M7)
 
 namespace Playerbot::States {
 
@@ -17681,7 +17682,7 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
         // all-bot group) must NOT be pulled to a hub by this rule — it would
         // scatter the group. Solo autonomous bots (ungrouped) still relocate.
         if (!_prof_mode && !has_same_map_turnin && !s.objective_is_relocation() &&
-            !s.in_group() &&
+            (!s.in_group() || (::Playerbot::V2::QuestParty::IsMember(s.bot_id()) && g.leader() == s.raw().guid)) &&   // local (M7): a quest party's leader relocates, its members follow
             (s.raw().quest_log.quests.empty() || nothing_local))
         {
             // Pick the nearest hub the bot hasn't already tried unproductively
@@ -20505,7 +20506,8 @@ void DispatchIdle(BotAI& ai,
         uint32 const now = s.published_at_ms();
         float px, py, pz;
         s.position(px, py, pz);
-        bool const exempt = s.has_owner_character() || s.in_group() || s.in_battleground() || s.is_in_instance() || s.on_transport()
+        // Local (M7): a quest party member (Fleet/QuestParty.h) is a world bot like any other here.
+        bool const exempt = s.has_owner_character() || (s.in_group() && !::Playerbot::V2::QuestParty::IsMember(s.bot_id())) || s.in_battleground() || s.is_in_instance() || s.on_transport()
             || s.is_mounted() || s.is_swimming() || s.in_combat() || s.is_casting() || s.hp_pct() < 70
             || Classic::IsEating(s) || Classic::IsDrinking(s)   // a meal or a mana drink is a reason to stand
             || (ai.last_rule_fired() && (std::strcmp(ai.last_rule_fired(), "idle:inn_rest") == 0            // resting at the inn is a reason to stand

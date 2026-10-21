@@ -121,6 +121,7 @@
 #include <cctype>
 #include <string_view>
 #include "Bot/DeathCause.h"
+#include "Fleet/QuestParty.h"   // local (M7)
 
 #if !TRINITY_PLAYERBOT_V2
 #error "PlayerbotV2 module compiled without TRINITY_PLAYERBOT_V2 defined; CMake misconfiguration"
@@ -1100,6 +1101,7 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
         {
             last_hint_check = total;
             DriveDeathLoopRescues();   // local (M7)
+            ::Playerbot::V2::QuestParty::Drive(GameTime::GetGameTimeMS());   // local (M7)
             SendDueAddonHints();
         }
     }
@@ -2947,8 +2949,9 @@ bool DeathLoopRescueEnabled() { return sConfigMgr->GetBoolDefault("Playerbot.Wor
 
 void NoteBotDeathForRescue(Player* vp)
 {
-    if (!DeathLoopRescueEnabled() || vp->GetGroup()) return;
     uint64 const guid = vp->GetGUID().GetCounter();
+    // A quest party (Fleet/QuestParty.h) dies together in the same loops; any other group looks after its own.
+    if (!DeathLoopRescueEnabled() || (vp->GetGroup() && !::Playerbot::V2::QuestParty::IsMember(guid))) return;
     if (Services::Owners().GetOwner(guid).account_id != 0) return;   // a player's companion: its owner handles it
     uint32 const now = GameTime::GetGameTimeMS();
     std::vector<uint32>& d = g_recent_deaths[guid];
