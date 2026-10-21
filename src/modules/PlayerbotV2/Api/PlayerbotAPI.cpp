@@ -7593,8 +7593,21 @@ Result API::restock_class_supplies()
         Item const* ranged = p_->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
         bool const gun = ranged && ranged->GetTemplate()->GetSubClass() == ITEM_SUBCLASS_WEAPON_GUN;
         uint8 const kind = gun ? 2 : 1;
-        uint32 const ammo = Classic::BestAmmo(kind, level);
+        uint32 ammo = Classic::BestAmmo(kind, level);
         ItemTemplate const* ammoProto = ammo ? sObjectMgr->GetItemTemplate(ammo) : nullptr;
+        // Local (M7): hunter bots of level 2-6 had no ammo at all (2026-10-21: 41 of 53 online), so they fought in melee and died
+        // most of all classes; the restock gave nothing and said nothing. When the pick is missing or unusable, fall back to the
+        // basic vendor ammo (Rough Arrow 2512 / Light Shot 2516) and say why.
+        if (!ammoProto || p_->CanUseItem(ammoProto) != EQUIP_ERR_OK)
+        {
+            uint32 const basic = gun ? 2516u : 2512u;
+            static std::atomic<uint32> s_ammo_log{ 0 };
+            if (s_ammo_log.fetch_add(1, std::memory_order_relaxed) < 50)
+                TC_LOG_INFO("playerbot.v2", "[supplies] {} L{} ammo pick {} {} (CanUseItem {}), using {}", p_->GetName(), uint32(level), ammo,
+                    ammoProto ? "unusable" : "missing", ammoProto ? uint32(p_->CanUseItem(ammoProto)) : 0u, basic);
+            ammo = basic;
+            ammoProto = sObjectMgr->GetItemTemplate(ammo);
+        }
         if (ammoProto && p_->CanUseItem(ammoProto) == EQUIP_ERR_OK)
         {
             uint32 have = 0;
