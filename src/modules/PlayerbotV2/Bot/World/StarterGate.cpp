@@ -74,4 +74,13 @@ bool StarterQuestTooEarly(Player const* bot, Quest const* quest)
     return std::none_of(it->second.begin(), it->second.end(), [home](Spot const& sp) { return Inside(*home, sp.map, sp.x, sp.y); });
 }
 
+bool QuestTooHardForBot(Player const* bot, Quest const* quest)
+{
+    static int32 const margin = sConfigMgr->GetIntDefault("Playerbot.Bot.SoloQuestLevelMargin", 2, true);
+    if (margin < 0 || !bot || !quest || quest->GetZoneOrSort() < 0)   // class and profession quests keep their own rules
+        return false;
+    int32 const ql = bot->GetQuestLevel(quest);
+    return ql > 0 && ql > int32(bot->GetLevel()) + margin + (bot->GetGroup() ? 2 : 0);
+}
+
 } // namespace Playerbot::Local

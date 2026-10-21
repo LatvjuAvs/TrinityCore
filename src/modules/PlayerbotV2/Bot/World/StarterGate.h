@@ -16,4 +16,9 @@ namespace Playerbot::Local {
 // True when the bot should not take this quest yet.
 bool StarterQuestTooEarly(Player const* bot, Quest const* quest);
 
+// Local (M7): the mirror of upstream's grey-quest skip. A quest more than Playerbot.Bot.SoloQuestLevelMargin (default 2;
+// -1 = off) levels above a solo bot, or that margin + 2 in a group, is red for it: live 2026-10-21 level 3-4 bots took
+// 784 "Vanquish the Betrayers" in Razor Hill and died in loops among the level 8-10 Kul Tiras Sailors.
+bool QuestTooHardForBot(Player const* bot, Quest const* quest);
+
 } // namespace Playerbot::Local

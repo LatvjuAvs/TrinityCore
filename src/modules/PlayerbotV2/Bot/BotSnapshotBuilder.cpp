@@ -7366,6 +7366,8 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 if (QuestGreyForSoloBot(p, q)) continue;
                 //  - Local (M7, FreshStart): a newcomer below level 4 does not take the way out of its starter area yet.
                 if (::Playerbot::Local::StarterQuestTooEarly(p, q)) continue;
+                //  - Local (M7): red for this bot (more than 2 levels above it solo, 4 in a group).
+                if (::Playerbot::Local::QuestTooHardForBot(p, q)) continue;
                 // Bot-side profession gate — diagnostic split-out. The actual
                 // skip decision is made by the shared BotCanStillTakeQuestForHub
                 // predicate below (which applies the SAME GetSkillValue==0 gate),

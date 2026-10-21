@@ -169,7 +169,7 @@ void Maintain(uint32 now)
             {
                 lo = std::min(lo, p->GetLevel());
                 hi = std::max(hi, p->GetLevel());
-                if (!InOpenWorld(p)) instance = true;
+                if (!p->IsBeingTeleported() && !InOpenWorld(p)) instance = true;   // a teleport (death-loop rescue) is not an instance
                 if (p->GetMapId() != ms.front()->GetMapId() || p->GetExactDist2d(ms.front()) > kApartRange) apart = true;
             }
             if (hi - lo > kLevelSpreadMax)
