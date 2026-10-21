@@ -139,6 +139,17 @@ bool CharterDriveFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
         }
     }
 
+    // Local (M7): an adopted charter (held from before a restart) resumes at "collect signatures".
+    if (phase == 0)
+        if (uint64 const held = Services::Guilds().ActiveFounderPetitionLow(kFaction))
+        {
+            ai.set_guild_charter(/*phase*/ 3, Services::Guilds().ActiveFounderName(kFaction), 0, now_ms);
+            ai.set_guild_charter_petition_low(held);
+            TC_LOG_WARN("playerbot.v2", "[CharterDrive] phase 0->3 (adopted charter) faction={} bot_id={} petition_low={}",
+                static_cast<uint32>(kFaction), s.bot_id(), held);
+            phase = 3;
+        }
+
     // Phase 0 -> 1: stamp start + find petitioner.
     if (phase == 0)
     {

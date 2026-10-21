@@ -165,6 +165,7 @@ public:
     // tick. Without this co-location, founders sit in their leveling
     // zone (no nearby petitioner NPC) and the FSM aborts via the
     // 30-min budget every cycle.
+    bool AdoptHeldCharter(Faction f);   // local (M7)
     void TeleportFounderAndSigners(uint64 founder_low, Faction f);
 
     // QueueRecruitInvite(): called from idle:guild_recruit_nearby when

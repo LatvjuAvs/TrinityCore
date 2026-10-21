@@ -19,6 +19,8 @@
 #include "BotGuildEvent.h"
 #include "BotGuildEventScheduler.h"
 #include "BotGuildNamePool.h"
+#include "OwnerRegistry.h"
+#include "../Session/BotSessionMgr.h"
 #include "DatabaseEnv.h"
 #include "Guild.h"
 #include "GuildMgr.h"
@@ -36,6 +38,7 @@
 #include "../Threading/IntentQueue.h"
 #include "Config.h"
 #include <algorithm>
+#include <unordered_map>
 
 namespace {
 
@@ -203,6 +206,12 @@ bool BotGuildMgr::EnsureFounderElected(Faction f)
         return false;
     }
 
+    // Local (M7): a bot that already holds a charter founds with it. The founder slot lives in memory, so after a restart a
+    // new founder was elected and the old charter, with its signatures, was dropped (live 2026-10-21: "Bloodspear Tribe"
+    // held by Pandoris while Andorn started over). Its charter FSM resumes at "collect signatures".
+    if (AdoptHeldCharter(f))
+        return true;
+
     // 3. Query candidates. Faction filter is done in C++ via
     //    Player::TeamForRace since CharacterDatabase doesn't carry a
     //    pre-computed team column. We over-fetch (LIMIT 50) and
@@ -299,6 +308,69 @@ bool BotGuildMgr::EnsureFounderElected(Faction f)
     TeleportFounderAndSigners(chosen_low, f);
 
     return true;
+}
+
+bool BotGuildMgr::AdoptHeldCharter(Faction f)
+{
+    // A holder that is not logged in (the spawner chose other bots after the restart) is logged in here, and the election
+    // waits up to 2 minutes for it; a holder that does not come online in that time is skipped until the next restart.
+    static std::unordered_map<uint64, uint32> s_login_asked;   // owner guid_low -> getMSTime() of the login request (world thread)
+    uint32 const now = getMSTime();
+    QueryResult held = CharacterDatabase.Query(
+        "SELECT p.ownerguid, c.race, p.petitionguid, p.name FROM petition p "
+        "JOIN characters c ON c.guid = p.ownerguid "
+        "JOIN playerbot_v2_character pv ON pv.character_guid_low = c.guid "
+        "LEFT JOIN guild_member gm ON gm.guid = c.guid "
+        "WHERE gm.guid IS NULL AND pv.setup_pipeline_state = 255 ORDER BY c.online DESC");
+    if (!held)
+        return false;
+    do
+    {
+        Field* row = held->Fetch();
+        uint64 const owner_low = row[0].GetUInt64();
+        Faction const fac = Player::TeamForRace(row[1].GetUInt8()) == ALLIANCE ? FACTION_ALLIANCE : FACTION_HORDE;
+        uint64 const petition_low = row[2].GetUInt64();
+        std::string const name = row[3].GetString();
+        if (fac != f || !petition_low)
+            continue;
+        if (!sPetitionMgr->GetPetition(ObjectGuid::Create<HighGuid::Item>(petition_low)))
+            continue;
+        if (Services::Owners().GetOwner(owner_low).account_id != 0)
+            continue;   // a player's companion
+        Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(owner_low));
+        if (!owner || !owner->IsInWorld())
+        {
+            auto it = s_login_asked.find(owner_low);
+            if (it == s_login_asked.end())
+            {
+                auto const lr = Services::SessionMgr().LoginBot(ObjectGuid::Create<HighGuid::Player>(owner_low));
+                s_login_asked[owner_low] = now;
+                TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] charter '{}' is held by offline bot guid_low={}: login {}{}", name, owner_low,
+                    lr.ok ? "requested" : "refused: ", lr.reason);
+                if (lr.ok)
+                    return true;   // hold the election until it is in the world
+                continue;
+            }
+            if (now - it->second < 2u * 60u * 1000u)
+                return true;
+            continue;
+        }
+        if (!owner->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(petition_low)))
+            continue;
+        {
+            std::lock_guard<std::mutex> g(mtx_);
+            active_founder_low_[f] = owner_low;
+            active_founder_name_[f] = name;
+            active_founder_at_ms_[f] = getMSTime();
+            active_founder_petition_low_[f] = petition_low;
+        }
+        if (BotAI* ai = Services::Registry().ai(owner_low))
+            ai->arm_charter_grace(getMSTime());
+        TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] Adopted the charter '{}' held by {} (guid_low={}, faction={}, {} signatures)",
+            name, owner->GetName(), owner_low, static_cast<uint32>(f), ActiveFounderSignatureCount(f));
+        return true;
+    } while (held->NextRow());
+    return false;
 }
 
 void BotGuildMgr::TeleportFounderAndSigners(uint64 founder_low, Faction f)
@@ -462,6 +534,7 @@ void BotGuildMgr::OnCharterSucceeded(Faction f, uint64 founder_low,
         active_founder_low_[f]    = 0;
         active_founder_name_[f].clear();
         active_founder_at_ms_[f]  = 0;
+        active_founder_petition_low_[f] = 0;   // local (M7): was left set; the next founder had "signers" pulled before it held a charter
     }
 
     if (g_name_pool) g_name_pool->Release(name);
@@ -484,6 +557,7 @@ void BotGuildMgr::OnCharterAborted(Faction f)
         active_founder_low_[f]    = 0;
         active_founder_name_[f].clear();
         active_founder_at_ms_[f]  = 0;
+        active_founder_petition_low_[f] = 0;   // local (M7): the next founder must not inherit this charter
     }
     if (g_name_pool && !released_name.empty())
         g_name_pool->Release(released_name);
