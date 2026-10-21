@@ -254,12 +254,12 @@ bool BotIntentEmitter::start_attack(ObjectGuid target)
         // Local (M7): not a mob the bot gave up on (combat:opener_give_up shields it for 5 minutes). Other rules (the rotation's
         // auto attack, the group assist) re-engaged it, and the give-up repeated every second for minutes (live 2026-10-21:
         // 3,116 give-ups in 18 minutes, most on Mottled Boars in the Valley of Trials). Short shields (8-30 s) are re-engage
-        // pacing, not a give-up, and are left alone.
-        if (ai_->engage_shielded(target, now_ms) && ai_->last_engage_shield_ms() >= 60u * 1000u)
+        // pacing, not a give-up, and are left alone; so is the solo flee's 60 s shield (the first version caught it, and deaths
+        // while fleeing doubled: 33 -> 65 in 18 minutes). Without a snapshot the attack is allowed.
+        if (school_snap_ && ai_->engage_shielded(target, now_ms) && ai_->last_engage_shield_ms() >= 5u * 60u * 1000u)
         {
             // A mob that attacks the bot is always fought back.
             bool attacks_me = false;
-            if (school_snap_)
             {
                 for (auto const& u : school_snap_->combat.attackers)
                     if (u.guid == target) { attacks_me = true; break; }
