@@ -3164,6 +3164,9 @@ Result API::stop_attack(bool clear_ghost_combat)
 {
     if (!p_) return Result::Other;
     p_->AttackStop();
+    // Local (M7): Auto Shot is an autorepeat spell, which AttackStop leaves running on the old target.
+    if (p_->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
+        p_->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
     if (!p_->IsInCombat())
         p_->SetSheath(SHEATH_STATE_UNARMED);
     // Mirror a real client deselecting on disengage â keeps the published
