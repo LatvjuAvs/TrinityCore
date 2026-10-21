@@ -173,16 +173,18 @@ bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
             uint32(s.level()), dist, (now_ms - trip.since_ms) / 1000u);
         return false;
     }
-    if (dist <= 30.0f)
+    // Up to 250 y: one pathed move straight to the trainer first (the core pathfinder covers about 290 y). The travel planner
+    // routes even a short trip through its node graph, whose nodes can lie the wrong way (live 2026-10-21: Katharina walked
+    // from 94 y to 261 y away from Llane Beshere in Northshire); it is the fallback when the direct move is refused.
+    bool const direct = dist <= 250.0f
+        && (emit.move_to(trip.x, trip.y, trip.z, /*run*/ true) || emit.move_already_emitted(trip.x, trip.y, trip.z));
+    if (direct)
     {
-        if (emit.move_to(trip.x, trip.y, trip.z, /*run*/ true) || emit.move_already_emitted(trip.x, trip.y, trip.z))
-        {
-            TripTrace(s, trip, dist, "near", true);
-            ai.set_last_rule_fired("idle:class_trainer_trip");
-            return true;
-        }
+        TripTrace(s, trip, dist, dist <= 30.0f ? "near" : "direct", true);
+        ai.set_last_rule_fired("idle:class_trainer_trip");
+        return true;
     }
-    else if (States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, trip.map, trip.x, trip.y, trip.z, /*quest_goal=*/false))
+    if (dist > 30.0f && States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, trip.map, trip.x, trip.y, trip.z, /*quest_goal=*/false))
     {
         TripTrace(s, trip, dist, "plan", true);
         ai.set_last_rule_fired("idle:class_trainer_trip");
