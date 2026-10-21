@@ -21,6 +21,8 @@
 #include "Config.h"
 #include "World/WorldMetadata.h"
 #include "Services.h"
+#include "Fleet/BotGuildMgr.h"
+#include "Player.h"
 #include "Travel/QuestHubDatabase.h"
 #include "Travel/RegionMapper.h"
 #include "ObjectAccessor.h"
@@ -777,6 +779,17 @@ bool WalkToKnownHubFire(BotSnapshotView const& s, BotAI& ai,
 bool QuestPursueGoalGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const& g, uint32)
 {
     if (s.in_combat() || s.is_casting()) return false;
+    // Local (M7): a guild founder on its way to a guild master (charter phases 0-2, 4, 5) goes there first; at 698 this rule
+    // outranked the charter drive (348), so a founder with an open quest never walked to the registrar (live 2026-10-21:
+    // Cinarce was teleported next to Aldwin Laughlin and walked back out to a quest). Waiting for signatures (phase 3)
+    // does not need the registrar: signers are brought to the founder.
+    if (s.raw().guild.id == 0 && ai.guild_charter_phase() != 3)
+    {
+        auto const f = Player::TeamForRace(s.race()) == ALLIANCE ? ::Playerbot::V2::BotGuildMgr::FACTION_ALLIANCE
+                                                                 : ::Playerbot::V2::BotGuildMgr::FACTION_HORDE;
+        if (Services::Guilds().ActiveFounderLow(f) == s.raw().guid.GetCounter())
+            return false;
+    }
     // A bot actively running a dungeon must NOT chase an outside-the-instance
     // quest objective — its goal POI is almost always in the open world, so
     // pursuing it walks the bot off the dungeon route (and into dead-end
