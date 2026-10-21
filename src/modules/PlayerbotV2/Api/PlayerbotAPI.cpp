@@ -6153,7 +6153,33 @@ Result API::use_game_object(ObjectGuid go_guid)
         TC_LOG_INFO("playerbot.v2", "[bg_capture] {} success entry={} (Use() now)", p_->GetName(), obj->GetEntry());
     }
 
+    // Local (M7): a classic herb / ore node is a chest with a Herbalism / Mining lock (see ClassicGatherType in the snapshot
+    // builder). Use() opens it without the gathering spell, so the skill never rose; give the skill-up the spell's OpenLock
+    // effect gives (one per node until it respawns).
+    uint32 gather_skill = 0, gather_req = 0;
+    if (obj->GetGoType() == GAMEOBJECT_TYPE_CHEST)
+        if (LockEntry const* lock = sLockStore.LookupEntry(obj->GetGOInfo()->GetLockId()))
+            for (uint8 i = 0; i < MAX_LOCK_CASE && !gather_skill; ++i)
+                if (lock->Type[i] == LOCK_KEY_SKILL && (lock->Index[i] == LOCKTYPE_HERBALISM || lock->Index[i] == LOCKTYPE_MINING))
+                {
+                    gather_skill = lock->Index[i] == LOCKTYPE_HERBALISM ? SKILL_HERBALISM : SKILL_MINING;
+                    gather_req = uint32(std::max<int32>(0, int32(lock->Skill[i])));
+                }
+    if (gather_skill && p_->GetPureSkillValue(gather_skill) < gather_req)
+        return Result::Locked;   // too low for this node, as the client's spell would refuse
+
     obj->Use(p_);
+
+    if (gather_skill && !obj->IsInSkillupList(p_->GetGUID()))
+    {
+        if (uint32 const pure = p_->GetPureSkillValue(gather_skill))
+        {
+            p_->UpdateGatherSkill(gather_skill, pure, gather_req, 1, obj);
+            obj->AddToSkillupList(p_->GetGUID());
+            TC_LOG_INFO("playerbot.v2", "[gather] {} {} skill {} -> {} (node {} needs {})", p_->GetName(),
+                gather_skill == SKILL_HERBALISM ? "Herbalism" : "Mining", pure, p_->GetPureSkillValue(gather_skill), obj->GetEntry(), gather_req);
+        }
+    }
 
     // Auto-loot for lootable GO types (CHEST, GOOBER with loot, etc.).
     // GameObject::Use opens the loot window server-side (m_loot is

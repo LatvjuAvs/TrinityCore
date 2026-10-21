@@ -10,6 +10,7 @@
 #include "Bot/BotIntent.h"
 #include "ObjectGuid.h"
 #include "Log.h"
+#include <atomic>
 
 namespace Playerbot {
 
@@ -84,7 +85,13 @@ bool GatherGate(BotSnapshotView const& s, BotAI&, GroupSnapshotView const&,uint3
         s.raw().movement.is_flying) return false;
     // Cheap precheck: any gathering node nearby?
     for (auto const& obj : s.raw().world_objects.nearby_objects)
-        if (obj.go_type == GO_GATHERING_NODE_LOCAL) return true;
+        if (obj.go_type == GO_GATHERING_NODE_LOCAL)
+        {
+            static std::atomic<uint32> s_diag{ 0 };
+            if (s_diag.fetch_add(1, std::memory_order_relaxed) < 30)
+                TC_LOG_INFO("playerbot.v2", "[gather_diag] {} gate open for node {}", s.name(), obj.entry);
+            return true;
+        }
     return false;
 }
 

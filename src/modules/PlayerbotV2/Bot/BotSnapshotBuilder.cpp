@@ -98,6 +98,38 @@
 #include <unordered_map>
 
 namespace Playerbot {
+namespace {
+// Local (M7): Classic herbs and ore veins are GAMEOBJECT_TYPE_CHEST (3) with a Herbalism / Mining skill lock, not the
+// retail GATHERING_NODE (50) that idle:gather and idle:gather_detour look for, so world bots never gathered (123 bots with
+// Herbalism, 68 with Mining, all at skill 1 on 2026-10-21). A chest whose lock this bot can open with its skill is published
+// as a gathering node; anything else keeps its own type.
+uint8 ClassicGatherType(Player const* p, GameObject const* go)
+{
+    uint8 const t = uint8(go->GetGoType());
+    if (t != GAMEOBJECT_TYPE_CHEST)
+        return t;
+    LockEntry const* lock = sLockStore.LookupEntry(go->GetGOInfo()->GetLockId());
+    if (!lock)
+        return t;
+    for (uint8 i = 0; i < MAX_LOCK_CASE; ++i)
+    {
+        if (lock->Type[i] != LOCK_KEY_SKILL)
+            continue;
+        uint32 const skill = lock->Index[i] == LOCKTYPE_HERBALISM ? SKILL_HERBALISM
+                           : lock->Index[i] == LOCKTYPE_MINING ? SKILL_MINING : 0u;
+        if (skill && p->GetSkillValue(skill) && p->GetSkillValue(skill) >= uint32(lock->Skill[i]))
+            return uint8(GAMEOBJECT_TYPE_GATHERING_NODE);
+        static std::atomic<uint32> s_diag{ 0 };
+        if (skill && s_diag.fetch_add(1, std::memory_order_relaxed) < 30)
+            TC_LOG_INFO("playerbot.v2", "[gather_diag] {} sees node {} (lock {} skill {} needs {}), has {}", p->GetName(), go->GetEntry(),
+                lock->ID, skill, lock->Skill[i], p->GetSkillValue(skill));
+    }
+    return t;
+}
+} // namespace
+} // namespace Playerbot
+
+namespace Playerbot {
 
 namespace {
 
@@ -8030,7 +8062,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
             BotSnapshot::NearbyObject n{};
             n.guid    = go->GetGUID();
             n.entry   = go->GetEntry();
-            n.go_type = go->GetGoType();
+            n.go_type = ClassicGatherType(p, go);   // local (M7): classic herb / ore chests count as gathering nodes
             // [bgflag_diag] TEMP — confirm CTF flag GO (type 36) is in-snapshot on
             // EotS(566)/TP(726), and which bot sees it (incl. distance via pos).
             if ((p->GetMapId() == 726 || p->GetMapId() == 566) && go->GetGoType() == 36)
@@ -8289,7 +8321,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
             for (GameObject* go : scratch_ext_gos)
             {
                 if (!go) continue;
-                const uint8 t = uint8(go->GetGoType());
+                const uint8 t = ClassicGatherType(p, go);   // local (M7)
                 if (t != GAMEOBJECT_TYPE_GATHERING_NODE &&
                     t != GAMEOBJECT_TYPE_FISHINGHOLE) continue;
                 if (ext_seen.count(go->GetGUID())) continue;
@@ -8306,7 +8338,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 BotSnapshot::NearbyObject n{};
                 n.guid    = go->GetGUID();
                 n.entry   = go->GetEntry();
-                n.go_type = go->GetGoType();
+                n.go_type = ClassicGatherType(p, go);   // local (M7)
                 n.x = go->GetPositionX();
                 n.y = go->GetPositionY();
                 n.z = go->GetPositionZ();
