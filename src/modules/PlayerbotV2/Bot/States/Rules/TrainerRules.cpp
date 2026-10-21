@@ -81,6 +81,8 @@ bool ClassTrainerTripGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
     if (trip.map != s.map_id() || GameTime::GetGameTimeMS() - trip.since_ms > kTripTimeoutMs)
     {
         ai.clear_trainer_trip();
+        TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} trip to its class trainer ended without arriving ({})", s.name(),
+            uint32(s.level()), trip.map != s.map_id() ? "left the map" : "timeout");
         return false;
     }
     return true;
@@ -99,10 +101,19 @@ bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
             (GameTime::GetGameTimeMS() - trip.since_ms) / 1000u);
         return false;
     }
-    // Like the RPG trips (RpgRules.cpp): the travel planner (roads, graph) for a long way, a chunked walk for the last part.
-    // A single long move_to is refused by the path API (Locked) and only piles up [move_blocked].
+    // Close by (the trainer's room): one short direct step into the interact ring; ChunkedWalkToward stops 9 y out.
+    // Farther: like the RPG trips (RpgRules.cpp), the travel planner beyond 250 y and a chunked walk below. A single long
+    // move_to is refused by the path API (Locked). A failed tick does not end the trip; the 20 minute timeout does.
     uint32 const now_ms = GameTime::GetGameTimeMS();
-    if (std::sqrt(d2) > 250.0f
+    float const dist = std::sqrt(d2);
+    if (dist <= 30.0f)
+    {
+        float const scale = (dist - 3.0f) / dist;
+        emit.move_to(bx + dx * scale, by + dy * scale, trip.z, /*run*/ true);
+        ai.set_last_rule_fired("idle:class_trainer_trip");
+        return true;
+    }
+    if (dist > 250.0f
         && States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, trip.map, trip.x, trip.y, trip.z, /*quest_goal=*/false))
     {
         ai.set_last_rule_fired("idle:class_trainer_trip");
@@ -110,11 +121,7 @@ bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
     }
     if (States::ChunkedWalkToward(s, ai, emit, trip.x, trip.y, trip.z, "idle:class_trainer_trip", now_ms))
         return true;
-    // No way there from here this time: give the trip up (the next level-up sets a new one).
-    ai.clear_trainer_trip();
-    TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} gave up the trip to its class trainer ({:.0f} y left)", s.name(), uint32(s.level()),
-        std::sqrt(d2));
-    return false;
+    return false;   // nothing this tick; other rules run, the trip stays until it arrives or times out
 }
 
 // ---------- idle:dual_spec_switch ----------

@@ -2188,6 +2188,10 @@ void BotPopulationManager::ScrubWorldGear(uint32 now_ms)
     if (last_gear_scrub_ms_ && (now_ms - last_gear_scrub_ms_) < kScrubIntervalMs)
         return;
     last_gear_scrub_ms_ = now_ms;
+    // Local (WoW Forever local server, M7): with Playerbot.Bot.EarnGear a world bot wears what it looted, was given for a quest
+    // or bought; no re-roll to generated gear of its level (and nothing to scrub: earned gear is never above the world cap).
+    if (sConfigMgr->GetBoolDefault("Playerbot.Bot.EarnGear", false, true))
+        return;
 
     uint32 scrubbed = 0, rerolled = 0;
     constexpr uint32 kRerollPerPass = 4u;
