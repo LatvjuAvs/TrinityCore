@@ -11,6 +11,9 @@
 #include "ClassicTalentBuilds.h"
 #include "ClassicSupplies.h"
 #include "Bot/ClassicUpkeep.h"
+#include "Bot/BotAI.h"
+#include "Bot/BotRegistry.h"
+#include "Services.h"
 #include "Bot/Raid/ShieldRules.h"
 #include "BotItemScorer.h"
 #include "Player.h"
@@ -6258,7 +6261,36 @@ Result API::accept_quest(ObjectGuid quest_giver, uint32 quest_id)
     if (!object)                                        { log_reject("giver_not_found");      return Result::InvalidTarget; }
     if (quest_giver.IsPlayer())                         { log_reject("player_giver_unsupp");  return Result::Other; }
     if (!object->hasQuest(quest_id))                    { log_reject("giver_lost_relation");  return Result::InvalidTarget; }
-    if (!p_->CanInteractWithQuestGiver(object))         { log_reject("out_of_range");         return Result::OutOfRange; }
+    if (!p_->CanInteractWithQuestGiver(object))
+    {
+        log_reject("out_of_range");
+        // Local (M7): the accept rule emits from within 3.5 y, so a refusal here is a giver the bot cannot interact with
+        // from where it can stand (live 2026-10-21: five bots retried Lee Brown's "Bottles and Baubles" at the Goldshire
+        // pier 1,048 times in 11 minutes). The third refusal of the same quest sets it aside for an hour (the offer scan
+        // skips blacklisted quests).
+        static std::mutex s_mtx;
+        static std::unordered_map<uint64, std::pair<uint32, uint8>> s_refused;   // (bot low << 32 | quest) -> (last ms, count)
+        uint32 const now_ms = GameTime::GetGameTimeMS();
+        uint64 const key = (p_->GetGUID().GetCounter() << 32) | quest_id;
+        bool give_up = false;
+        {
+            std::lock_guard<std::mutex> lk(s_mtx);
+            if (s_refused.size() > 4096) s_refused.clear();
+            auto& e = s_refused[key];
+            if (now_ms - e.first > 10u * 60u * 1000u) e.second = 0;
+            e.first = now_ms;
+            give_up = ++e.second >= 3;
+            if (give_up) s_refused.erase(key);
+        }
+        if (give_up)
+            if (::Playerbot::BotAI* ai = ::Playerbot::Services::Registry().ai(p_->GetGUID().GetCounter()))
+            {
+                ai->blacklist_quest(quest_id, now_ms);
+                TC_LOG_INFO("playerbot.v2", "[accept_quest] {} sets quest {} aside for an hour: its giver refused 3 accepts as out of range",
+                    p_->GetName(), quest_id);
+            }
+        return Result::OutOfRange;
+    }
     // Junk-quest accept-gate (R2, defense-in-depth). A quest with ZERO
     // objectives AND no creature/GO turn-in NPC is structurally unfinishable
     // and unturnable â accepting it parks the bot forever (current_quest_id=0
