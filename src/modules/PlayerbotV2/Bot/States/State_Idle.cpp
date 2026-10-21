@@ -18204,6 +18204,24 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
             const float arrived = at.radius > 2.f ? (at.radius - 2.f) : at.radius;
             if (dsq <= arrived * arrived)
             {
+                // Local (M7): world area triggers are reported by the client (CMSG_AREA_TRIGGER), and a bot has none, so
+                // standing inside never gave credit. Report the entry, as RaidCombat does for raid triggers; the API checks
+                // that the bot is inside. At most every 3 s per bot.
+                {
+                    static std::mutex s_at_mtx;
+                    static std::unordered_map<uint64, uint32> s_at_ms;
+                    uint32 const at_now = s.published_at_ms();
+                    bool due = false;
+                    {
+                        std::lock_guard<std::mutex> lk(s_at_mtx);
+                        if (s_at_ms.size() > 4096) s_at_ms.clear();
+                        uint32& last = s_at_ms[s.bot_id()];
+                        if (!last || at_now - last >= 3000u) { last = at_now ? at_now : 1u; due = true; }
+                    }
+                    if (due && emit.enter_area_trigger(at.entry))
+                        TC_LOG_INFO("playerbot.v2", "[quest_areatrigger] {} enters area trigger {} for quest {}", s.name(), at.entry,
+                            s.raw().quest_log.current_quest_id);
+                }
                 ai.set_last_rule_fired("idle:quest_areatrigger:in");
                 return true;
             }
