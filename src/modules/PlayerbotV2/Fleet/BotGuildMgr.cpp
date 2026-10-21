@@ -310,6 +310,8 @@ bool BotGuildMgr::EnsureFounderElected(Faction f)
     return true;
 }
 
+namespace { void RememberSignerOrigin(Player* sig); }   // local (M7), defined with PullSignersToFounder
+
 bool BotGuildMgr::AdoptHeldCharter(Faction f)
 {
     // A holder that is not logged in (the spawner chose other bots after the restart) is logged in here, and the election
@@ -449,6 +451,7 @@ void BotGuildMgr::TeleportFounderAndSigners(uint64 founder_low, Faction f)
         const float angle = (float(angle_idx) * k2Pi) / float(kMaxSignersToPull);
         const float dx = std::cos(angle) * kRingRadius;
         const float dy = std::sin(angle) * kRingRadius;
+        RememberSignerOrigin(sig);   // local (M7): sent back after signing
         Playerbot::BotMovement::SafeTeleport(sig,
             WorldLocation(spot.map_id, Position(spot.x + dx, spot.y + dy, spot.z, 0.f)),
             /*options*/ 0);
@@ -574,6 +577,46 @@ namespace {
 // of its faction are brought next to it, at most every 3 minutes; they sign on their next tick (idle:guild_charter_sign).
 uint32 g_last_signer_pull_ms[2] = { 0, 0 };
 
+// Local (M7): signers go back where they came from. Both pulls teleport guildless bots of any level next to the founder and
+// left them there: low-level dwarves and gnomes stood in Teldrassil with only Dun Morogh quests, which the picker never
+// chooses across continents (live 2026-10-21: [picker_none] Stalen, Ametheru). World thread only (Tick and the election).
+struct SignerOrigin { uint32 map; float x, y, z, o; uint32 pulled_ms; };
+std::unordered_map<uint64, SignerOrigin> g_signer_origin;
+
+void RememberSignerOrigin(Player* sig)
+{
+    if (!sig || g_signer_origin.contains(sig->GetGUID().GetCounter()))
+        return;
+    g_signer_origin[sig->GetGUID().GetCounter()] = { sig->GetMapId(), sig->GetPositionX(), sig->GetPositionY(),
+                                                     sig->GetPositionZ(), sig->GetOrientation(), getMSTime() };
+}
+
+void ReturnSigners(uint32 now_ms)
+{
+    uint32 returned = 0;
+    for (auto it = g_signer_origin.begin(); it != g_signer_origin.end();)
+    {
+        if (now_ms - it->second.pulled_ms < 2u * 60u * 1000u) { ++it; continue; }
+        Player* sig = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(it->first));
+        if (!sig || !sig->IsInWorld())
+        {
+            it = g_signer_origin.erase(it);   // logged out: it logs back in where it was saved
+            continue;
+        }
+        if (sig->IsInCombat() || !sig->IsAlive() || sig->IsBeingTeleported() || sig->GetGroup())
+        {
+            if (now_ms - it->second.pulled_ms > 20u * 60u * 1000u) it = g_signer_origin.erase(it); else ++it;
+            continue;
+        }
+        Playerbot::BotMovement::SafeTeleport(sig, WorldLocation(it->second.map,
+            Position(it->second.x, it->second.y, it->second.z, it->second.o)), 0);
+        ++returned;
+        it = g_signer_origin.erase(it);
+    }
+    if (returned)
+        TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] sent {} charter signer(s) back where they were", returned);
+}
+
 void PullSignersToFounder(Player* founder, BotGuildMgr::Faction f, uint32 want)
 {
     QueryResult sigs = CharacterDatabase.PQuery(
@@ -597,6 +640,7 @@ void PullSignersToFounder(Player* founder, BotGuildMgr::Faction f, uint32 want)
         if (!sig || sig == founder || !sig->IsInWorld() || sig->IsInCombat() || sig->GetGroup() || !sig->IsAlive())
             continue;
         float const a = float(pulled) * 6.2831853f / float(std::max(1u, want));
+        RememberSignerOrigin(sig);
         Playerbot::BotMovement::SafeTeleport(sig, WorldLocation(founder->GetMapId(),
             Position(founder->GetPositionX() + std::cos(a) * 6.0f, founder->GetPositionY() + std::sin(a) * 6.0f,
                      founder->GetPositionZ(), 0.f)), 0);
@@ -632,6 +676,8 @@ void BotGuildMgr::Tick(uint32 now_ms)
         if (at_ms != 0 && (now_ms - at_ms) > kBudgetMs)
             OnCharterAborted(static_cast<Faction>(fi));
     }
+
+    ReturnSigners(now_ms);   // local (M7)
 
     // Local (M7): signers for a charter the founder holds (see PullSignersToFounder).
     for (uint8 fi = 0; fi < FACTION_COUNT && fi < 2; ++fi)
