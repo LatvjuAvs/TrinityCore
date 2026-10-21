@@ -5753,7 +5753,13 @@ Result API::hearth()
     constexpr uint32 HEARTHSTONE_ITEM = 6948;
     if (!p_->HasItemCount(HEARTHSTONE_ITEM, 1, /*inBankAlso*/ false))
         return Result::NotKnown;
-    return use_item_by_entry(HEARTHSTONE_ITEM, p_->GetGUID());
+    // Local (M7): the hearth cannot start while the bot moves (live 2026-10-21: Anderenz walking in Stormwind never left).
+    if (p_->isMoving())
+        stop_movement(/*clear_generators*/ true);
+    Result const r = use_item_by_entry(HEARTHSTONE_ITEM, p_->GetGUID());
+    if (r != Result::Ok)
+        TC_LOG_INFO("playerbot.v2", "[hearth] {} could not use its hearthstone: result {}", p_->GetName(), int(r));
+    return r;
 }
 
 // ---- NPC / world interaction ----------------------------------------------
