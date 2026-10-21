@@ -838,7 +838,7 @@ void DispatchInGroup(BotAI& ai,
                             // MarksNeedOrder: an idle skull is a plan, the owner's order starts the pull.
                             if (u.unit_in_combat || !u.victim.IsEmpty() ||
                                 (!group.leader_is_bot() && MarkGate::MayEngage(snapshot, ai, &group, skull, &u)))
-                                assist_target = skull; assist_src = "skull";
+                            { assist_target = skull; assist_src = "skull"; }
                             break;
                         }
                     if (assist_target.IsEmpty())
@@ -876,6 +876,10 @@ void DispatchInGroup(BotAI& ai,
             auto resolves_hostile = [&](ObjectGuid v) -> bool
             {
                 if (v.IsEmpty()) return false;
+                // Local (M7): not a mob this bot gave up on (opener_give_up shields it for 5 minutes). Copying the leader's victim
+                // re-selected it at once, and the give-up repeated every 300 ms (live 2026-10-21: Terenelli 166 times on one
+                // Mottled Boar). A mob on a member is still defended below (defend_member).
+                if (ai.engage_shielded(v, snapshot.published_at_ms())) return false;
                 for (auto const& u : snapshot.raw().combat.nearby_enemies)
                     if (u.guid == v && u.hp > 0) return true;
                 for (auto const& u : snapshot.raw().combat.attackers)
@@ -899,7 +903,7 @@ void DispatchInGroup(BotAI& ai,
                 {
                     if (u.guid != leader_member->victim || u.hp <= 0) continue;
                     float const lx = u.x - leader_member->x, ly = u.y - leader_member->y;
-                    if (lx * lx + ly * ly <= 25.f * 25.f) assist_target = u.guid; assist_src = "owner_target";
+                    if (lx * lx + ly * ly <= 25.f * 25.f) { assist_target = u.guid; assist_src = "owner_target"; }
                     break;
                 }
             }
@@ -907,7 +911,7 @@ void DispatchInGroup(BotAI& ai,
             // copying it set the stray bots fighting each other's mobs in Eastvale while the raid lay dead in Onyxia's Lair, so a member of
             // the group stayed in combat and the owner could not release (n58 live 2026-10-15 11:28, Amastorion).
             else if (leader_member->map_id == snapshot.map_id() && resolves_hostile(leader_member->victim))
-                assist_target = leader_member->victim; assist_src = "leader_victim";
+            { assist_target = leader_member->victim; assist_src = "leader_victim"; }
             if (assist_target.IsEmpty() && !window_limited)
                 for (auto const& m : *members)
                     if (m.online && m.map_id == snapshot.map_id() && m.in_combat && resolves_hostile(m.victim))
