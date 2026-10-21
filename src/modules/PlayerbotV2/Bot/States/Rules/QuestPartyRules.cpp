@@ -80,13 +80,21 @@ std::unordered_map<uint64, std::pair<uint32, uint32>> g_stranded;   // bot -> (n
 
 bool StrandedHearthGate(BotSnapshotView const& s, BotAI&, GroupSnapshotView const&, uint32)
 {
-    if (s.level() >= 20 || s.in_combat() || s.is_casting() || s.raw().movement.is_mounted || s.has_owner_character()) return false;
+    if (s.level() >= 20 || s.in_combat() || s.raw().movement.is_mounted || s.has_owner_character()) return false;
     if (s.in_group() || s.is_in_dungeon() || s.in_battleground() || s.is_in_instance() || s.on_transport()) return false;
+    if (s.homebind_map_id() == s.map_id()) return false;   // cheap test first: only a bot away from its home map qualifies
     uint32 const now = s.published_at_ms();
     std::lock_guard<std::mutex> lk(g_stranded_mtx);
+    // The hearth is a 10 s cast that any move interrupts: hold the bot still for 12 s after starting it (live 2026-10-21:
+    // two night elves in Stormwind walked off and their hearths failed).
+    if (auto it = g_stranded.find(s.bot_id()); it != g_stranded.end() && it->second.second && now - it->second.second < 12000u &&
+        s.homebind_map_id() != s.map_id())
+        return true;
+    if (s.is_casting()) return false;
+    if (s.raw().quest_log.current_quest_id == 0 && s.raw().quest_log.quests.empty()) return false;
     if (s.raw().quest_log.current_quest_id != 0 || s.raw().quest_log.quests.empty())
     {
-        g_stranded.erase(s.bot_id());
+        if (auto it = g_stranded.find(s.bot_id()); it != g_stranded.end()) it->second.first = 0;   // keep the last hearth time
         return false;
     }
     if (!s.can_hearth() || s.homebind_map_id() == s.map_id()) return false;
@@ -98,6 +106,15 @@ bool StrandedHearthGate(BotSnapshotView const& s, BotAI&, GroupSnapshotView cons
 
 bool StrandedHearthFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, BotIntentEmitter& emit, uint32)
 {
+    {
+        std::lock_guard<std::mutex> lk(g_stranded_mtx);
+        if (auto it = g_stranded.find(s.bot_id()); it != g_stranded.end() && it->second.second &&
+            s.published_at_ms() - it->second.second < 12000u)
+        {
+            ai.set_last_rule_fired("idle:stranded_hearth:casting");
+            return true;   // stand still while the hearth casts
+        }
+    }
     if (!emit.hearth()) return false;
     {
         std::lock_guard<std::mutex> lk(g_stranded_mtx);
@@ -120,7 +137,7 @@ void RegisterQuestPartyRules(IdleRuleRegistry& r)
         hr.priority = 699;   // just above idle:pursue_quest_goal (698), which has nothing to pursue here
         hr.gate     = &StrandedHearthGate;
         hr.fire     = &StrandedHearthFire;
-        hr.min_interval_ms = 5000;
+        hr.min_interval_ms = 0;   // it holds the bot still while the hearth casts (a throttle lets other rules move it)
         r.register_rule(std::move(hr));
     }
     IdleRule rule;
