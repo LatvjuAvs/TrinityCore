@@ -1889,7 +1889,7 @@ Result API::move_to(float x, float y, float z, bool run, bool direct, bool drop,
         // Elf bots without any navmesh regen.
         if ((p_->InBattleground() && z < p_->GetPositionZ() - 3.0f &&
              TryBgDescentCrawl(x, y, z, run)) ||
-            TryTerrainWalkFallback(x, y, z, run))
+            TryTerrainWalkFallback(x, y, z, run) || TrySwimCrossing(x, y, z, run))
             return Result::Ok;
         if (dbg_gap1)
             TC_LOG_INFO("playerbot.v2", "[gap1] {} REFUSE NoPath pos=({:.1f},{:.1f}) "
@@ -1946,7 +1946,7 @@ Result API::move_to(float x, float y, float z, bool run, bool direct, bool drop,
                 p_->GetPositionY(), x, y, z);
         if ((p_->InBattleground() && z < p_->GetPositionZ() - 3.0f &&
              TryBgDescentCrawl(x, y, z, run)) ||
-            TryTerrainWalkFallback(x, y, z, run))
+            TryTerrainWalkFallback(x, y, z, run) || TrySwimCrossing(x, y, z, run))
             return Result::Ok;
         Playerbot::V2::Module::instance().OnPathOutcome(3 /*FarFromPolyEnd*/);
         log_path_fail("FarFromPolyEnd");
@@ -2663,6 +2663,63 @@ Result API::move_to(float x, float y, float z, bool run, bool direct, bool drop,
     }
     p_->GetMotionMaster()->MovePoint(0, x, y, z, /*generatePath*/ true);
     return Result::Ok;
+}
+
+// Local (M7): swim across a short stretch of water. The navmesh ends at the waterline, so a goal across a channel (Echo Isles
+// from Sen'jin: "Minshina's Skull" 154 bot holders, "Zalazane" 101, none ever turned in) came back NoPath / FarFromPolyEnd and
+// the bot stood on the shore. Along the bearing of the asked point, up to 160 y: no magma or slime, water seen, then the first
+// dry ground is the landing; the bot swims straight there (no path). Open sea (no landing within 160 y) is refused.
+bool API::TrySwimCrossing(float x, float y, float z, bool run)
+{
+    Map* mm = p_->GetMap();
+    if (!mm || mm->IsDungeon() || mm->IsBattlegroundOrArena() || p_->IsInFlight() || p_->GetVehicle())
+        return false;
+    float const bx = p_->GetPositionX(), by = p_->GetPositionY(), bz = p_->GetPositionZ();
+    float const dx = x - bx, dy = y - by, d = std::hypot(dx, dy);
+    if (d < 5.0f)
+        return false;
+    static std::unordered_map<uint64, uint32> s_last;   // world thread (move_to runs there)
+    uint32 const now = GameTime::GetGameTimeMS();
+    uint32& last = s_last[p_->GetGUID().GetCounter()];
+    if (last && now - last < 15000u)
+        return false;
+    float const ux = dx / d, uy = dy / d;
+    bool water = BotMovement::IsLiquidImpassableForWalk(BotMovement::ClassifyDestinationLiquid(p_, bx, by, bz));
+    float lx = 0.f, ly = 0.f, lz = 0.f;
+    bool landing = false;
+    for (float s = 4.0f; s <= 160.0f; s += 4.0f)
+    {
+        float const px = bx + ux * s, py = by + uy * s;
+        float const g = mm->GetHeight(p_->GetPhaseShift(), px, py, bz + 30.0f, /*vmap*/ true, 80.0f);
+        if (g <= INVALID_HEIGHT + 1.0f)
+            continue;
+        BotMovement::LiquidVerdict const v = BotMovement::ClassifyDestinationLiquid(p_, px, py, g);
+        if (v == BotMovement::LiquidVerdict::Hazard)
+            return false;
+        if (v == BotMovement::LiquidVerdict::Swim)
+        {
+            water = true;
+            continue;
+        }
+        if (water)
+        {
+            // Land on the asked point when it is dry and on this side of the first landing's far reach.
+            if (s >= d && !BotMovement::IsLiquidImpassableForWalk(BotMovement::ClassifyDestinationLiquid(p_, x, y, z)))
+            { lx = x; ly = y; lz = z; }
+            else
+            { lx = px; ly = py; lz = g; }
+            landing = true;
+            break;
+        }
+    }
+    if (!water || !landing)
+        return false;
+    last = now ? now : 1u;
+    p_->SetWalk(!run);
+    p_->GetMotionMaster()->MovePoint(0, lx, ly, lz, /*generatePath*/ false);
+    TC_LOG_INFO("playerbot.v2", "[swim_cross] {} swims from ({:.0f},{:.0f}) to ({:.0f},{:.0f},{:.1f}), {:.0f} y",
+        p_->GetName(), bx, by, lx, ly, lz, std::hypot(lx - bx, ly - by));
+    return true;
 }
 
 bool API::TryTerrainWalkFallback(float x, float y, float z, bool run)

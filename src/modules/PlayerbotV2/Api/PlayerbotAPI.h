@@ -1130,6 +1130,7 @@ private:
     // no cliff/wall Z-jumps, no lava/deep water) so it can't reintroduce the
     // wall-walking that made us disable TC's blanket straight-line fallback.
     bool TryTerrainWalkFallback(float x, float y, float z, bool run);
+    bool TrySwimCrossing(float x, float y, float z, bool run);   // local (M7)
 
     // BG start-platform / graveyard STEP-DOWN. When a battleground bot is stuck
     // on an elevated, OVERHANGING start/respawn platform whose navmesh doesn't
