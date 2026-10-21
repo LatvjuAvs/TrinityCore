@@ -493,6 +493,49 @@ void BotGuildMgr::OnCharterAborted(Faction f)
         static_cast<uint32>(f), released_founder, released_name);
 }
 
+namespace {
+// Local (M7): signers for a charter the founder already holds. Upstream pulls 4 guildless bots to the registrar once, at the
+// election; a founder that walks there (or one elected after a restart) arrives after they left, and the charter timed out
+// with 0 of 4 signatures (live 2026-10-21 16:14). While a founder holds a charter with too few signatures, guildless bots
+// of its faction are brought next to it, at most every 3 minutes; they sign on their next tick (idle:guild_charter_sign).
+uint32 g_last_signer_pull_ms[2] = { 0, 0 };
+
+void PullSignersToFounder(Player* founder, BotGuildMgr::Faction f, uint32 want)
+{
+    QueryResult sigs = CharacterDatabase.PQuery(
+        "SELECT c.guid, c.race FROM characters c "
+        "JOIN playerbot_v2_character pv ON c.guid = pv.character_guid_low "
+        "LEFT JOIN guild_member gm ON gm.guid = c.guid "
+        "WHERE gm.guid IS NULL AND pv.setup_pipeline_state = 255 "
+        "AND c.guid != {} AND c.online = 1 ORDER BY RAND() LIMIT 30", founder->GetGUID().GetCounter());
+    if (!sigs)
+        return;
+    uint32 pulled = 0;
+    do
+    {
+        Field* row = sigs->Fetch();
+        uint64 const low = row[0].GetUInt64();
+        BotGuildMgr::Faction const fac = Player::TeamForRace(row[1].GetUInt8()) == ALLIANCE
+            ? BotGuildMgr::FACTION_ALLIANCE : BotGuildMgr::FACTION_HORDE;
+        if (fac != f)
+            continue;
+        Player* sig = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(low));
+        if (!sig || sig == founder || !sig->IsInWorld() || sig->IsInCombat() || sig->GetGroup() || !sig->IsAlive())
+            continue;
+        float const a = float(pulled) * 6.2831853f / float(std::max(1u, want));
+        Playerbot::BotMovement::SafeTeleport(sig, WorldLocation(founder->GetMapId(),
+            Position(founder->GetPositionX() + std::cos(a) * 6.0f, founder->GetPositionY() + std::sin(a) * 6.0f,
+                     founder->GetPositionZ(), 0.f)), 0);
+        if (BotAI* sai = Services::Registry().ai(low))
+            sai->arm_charter_grace(getMSTime());
+        if (++pulled >= want)
+            break;
+    } while (sigs->NextRow());
+    TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] charter of {} needs signatures: brought {} signer(s) next to the founder (map {} {:.0f},{:.0f})",
+        founder->GetName(), pulled, founder->GetMapId(), founder->GetPositionX(), founder->GetPositionY());
+}
+} // namespace
+
 void BotGuildMgr::Tick(uint32 now_ms)
 {
     // 60s rate limit — the manager doesn't need finer granularity
@@ -516,6 +559,23 @@ void BotGuildMgr::Tick(uint32 now_ms)
             OnCharterAborted(static_cast<Faction>(fi));
     }
 
+    // Local (M7): signers for a charter the founder holds (see PullSignersToFounder).
+    for (uint8 fi = 0; fi < FACTION_COUNT && fi < 2; ++fi)
+    {
+        Faction const f = static_cast<Faction>(fi);
+        uint64 const founder_low = ActiveFounderLow(f);
+        if (!founder_low || !ActiveFounderPetitionLow(f))
+            continue;
+        uint32 const required = uint32(sConfigMgr->GetIntDefault("MinPetitionSigns", 4, true));
+        uint32 const have = ActiveFounderSignatureCount(f);
+        if (have >= required || (g_last_signer_pull_ms[fi] && now_ms - g_last_signer_pull_ms[fi] < 3u * 60u * 1000u))
+            continue;
+        Player* founder = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(founder_low));
+        if (!founder || !founder->IsInWorld() || founder->IsInCombat() || founder->IsBeingTeleported())
+            continue;
+        g_last_signer_pull_ms[fi] = now_ms ? now_ms : 1u;
+        PullSignersToFounder(founder, f, required - have);
+    }
     // Sweep stale name reservations (60-min cutoff = 2× FSM budget).
     if (g_name_pool) g_name_pool->SweepStale(60u * 60u);
 

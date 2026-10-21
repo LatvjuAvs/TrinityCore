@@ -165,7 +165,7 @@ bool GatherDetourFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
         best = &obj; best_dsq = dsq;
     }
     if (!best) return false;
-    emit.move_to(best->x, best->y, best->z, /*run*/ false);
+    emit.move_to(best->x, best->y, best->z, /*run*/ true);   // local (M7): was a walk; 1,642 detours, 6 nodes reached
     ai.set_last_rule_fired("idle:gather_detour");
     return true;
 }
