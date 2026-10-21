@@ -726,6 +726,23 @@ void BuildOnce()
         if (!quest) continue;
         QuestPOIData const* poi = sObjectMgr->GetQuestPOIData(int32(quest_id));
 
+        // Local (M7): objective-less explore quest ("The Fargodeep Mine"): its goal is only an areatrigger_involvedrelation
+        // row. Index the triggers as objective id 0, the place the synthesized explore objective walks to.
+        if (quest->GetObjectives().empty() && !quest->GetSrcItemId() && ctx.quest_areatriggers.contains(quest_id))
+        {
+            QuestObjective fake;
+            fake.ID = 0;
+            fake.QuestID = quest_id;
+            fake.Type = QUEST_OBJECTIVE_AREATRIGGER;
+            fake.ObjectID = -1;
+            fake.Amount = 1;
+            SetPtr set = BuildForObjective(ctx, quest, fake);
+            if (set && !set->clusters.empty())
+                g_by_objective.emplace(ObjKey(quest_id, 0), set);
+            tally(false, set);
+            continue;
+        }
+
         // Objective-less quest with a start item: the synthesized use-item
         // objective (id 0) - location = where the item's spell must be used.
         if (quest->GetObjectives().empty() && quest->GetSrcItemId())

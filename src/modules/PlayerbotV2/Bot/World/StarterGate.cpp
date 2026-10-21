@@ -109,12 +109,23 @@ void RefreshFleetStuckQuests(uint32 now_ms)
         " WHERE rw.quest = q.quest) AS rewarded "
         "FROM character_queststatus q JOIN playerbot_v2_character pv ON pv.character_guid_low = q.guid "
         "GROUP BY q.quest HAVING holders >= 30 AND rewarded * 20 < holders");
+    // Area-trigger (explore) quests are left out since bots report trigger entries (2026-10-22); before that no bot had ever
+    // turned one in, so their statistics say nothing yet.
+    static std::unordered_set<uint32> const s_trigger_quests = []
+    {
+        std::unordered_set<uint32> out;
+        if (QueryResult at = WorldDatabase.Query("SELECT DISTINCT quest FROM areatrigger_involvedrelation"))
+            do out.insert(at->Fetch()[0].GetUInt32()); while (at->NextRow());
+        return out;
+    }();
     std::unordered_set<uint32> fresh;
     std::string list;
     if (r)
         do
         {
             Field* f = r->Fetch();
+            if (s_trigger_quests.contains(f[0].GetUInt32()))
+                continue;
             fresh.insert(f[0].GetUInt32());
             if (list.size() < 400)
                 list += fmt::format("{}({}/{}) ", f[0].GetUInt32(), f[2].GetUInt64(), f[1].GetUInt64());

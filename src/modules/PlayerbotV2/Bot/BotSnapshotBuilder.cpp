@@ -5541,6 +5541,34 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 // wedged 91 min on Moira). Synthesize an ACTIONABLE use-item
                 // objective anchored at the QuestPOI centroid so it ranks as local
                 // work (best_same_map) and idle:quest_use_item_on_target drives it.
+                // Local (M7): an objective-less EXPLORE quest (its goal only an area trigger, "The Fargodeep Mine": 181 bot
+                // holders, none ever turned it in) is local work at the nearest trigger, not a turn-in; the quest area
+                // trigger rule walks in and reports the entry.
+                if (q.state == 0 && q.objectives.empty() && q.source_item_id == 0 &&
+                    !(bot_ai && bot_ai->objective_blacklisted(q.quest_id, 0u, now_ms)))
+                {
+                    ObjectiveCluster oc;
+                    if (PickQuestObjectiveCluster(q.quest_id, 0u, bot_map, p->GetPositionX(), p->GetPositionY(), oc) &&
+                        oc.kind == ObjectiveClusterKind::AreaTrigger && oc.map_id == bot_map)
+                    {
+                        float const edge = std::hypot(oc.x - p->GetPositionX(), oc.y - p->GetPositionY());
+                        if (edge <= 1500.0f && edge < best_same_map_dist)
+                        {
+                            QuestObjectiveEntry synth{};
+                            synth.id        = 0;
+                            synth.quest_id  = q.quest_id;
+                            synth.type      = QUEST_OBJECTIVE_AREATRIGGER;
+                            synth.object_id = int32(oc.anchor_entry);
+                            synth.amount    = 1;
+                            synth.progress  = 0;
+                            best_same_map       = synth;
+                            best_same_map_quest = q.quest_id;
+                            best_same_map_set   = true;
+                            best_same_map_dist  = edge;
+                        }
+                        continue;   // never a turn-in while incomplete
+                    }
+                }
                 if (q.state == 0 && q.objectives.empty() && q.source_item_id != 0 &&
                     p->HasItemCount(q.source_item_id, 1))
                 {
