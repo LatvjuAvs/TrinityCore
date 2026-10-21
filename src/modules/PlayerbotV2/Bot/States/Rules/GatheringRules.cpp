@@ -126,8 +126,9 @@ bool GatherFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,Bo
 // left untouched.
 bool GatherFullGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const& g, uint32 now_ms)
 {
-    // Quest-first (2026-06-16): yield to a reachable quest action.
-    if (s.has_actionable_quest()) return false;
+    // Local (M7): no quest-first yield. GatherFire only acts on a node within 5 y, a 3 s pick; with the yield a bot with any
+    // actionable quest (nearly all) never gathered: the detour brought it to the node and the pick was skipped (2026-10-21:
+    // 968 detours, 6 nodes in 30 minutes).
     return GatherGate(s, ai, g, now_ms);
 }
 

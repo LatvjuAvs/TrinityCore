@@ -13,6 +13,8 @@
 #include "../Services.h"
 #include "../Bot/BotRegistry.h"
 #include "OwnerRegistry.h"
+#include "BotGroupBuilder.h"
+#include "BotCoordinationBus.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -281,6 +283,56 @@ void Form(uint32 now)
     }
 }
 
+// ---- Dungeon groups (Playerbot.World.DungeonGroups) ----
+// Upstream forms bot dungeon groups only for guild dungeon nights (Tuesday and Thursday 20:00, guild members of 15+). Every
+// Playerbot.World.DungeonGroupMinutes (20) per faction, when at least 8 free world bots of 15+ are online, this asks the same
+// builder for one group of 1 tank, 1 healer and 3 damage (BotGroupBuilder::BuildGroup, source GuildEventForming, content 3 =
+// dungeon night, any guild): ~10 s later its leader queues for a dungeon of its level and the dungeon autopilot runs it.
+uint32 g_last_dungeon_ms[2] = { 0, 0 };
+
+void DriveDungeonGroups(uint32 now)
+{
+    static bool const enabled = sConfigMgr->GetBoolDefault("Playerbot.World.DungeonGroups", false, true);
+    static uint32 const every = uint32(std::max(5, sConfigMgr->GetIntDefault("Playerbot.World.DungeonGroupMinutes", 20, true))) * 60000u;
+    constexpr uint8 kMinLevel = 15;     // Ragefire Chasm, the lowest bracket the builder's dungeon pick queues for
+    constexpr uint32 kMinFree = 8;      // enough bots that a 5-man with a tank and a healer can be found
+    if (!enabled)
+        return;
+    std::vector<uint64> ids;
+    Services::Registry().for_each([&](BotId id, auto const&) { ids.push_back(id); });
+    uint32 free_count[2] = { 0, 0 };
+    uint8 lo[2] = { 255, 255 }, hi[2] = { 0, 0 };
+    for (uint64 id : ids)
+    {
+        Player* p = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(id));
+        if (!p || !InOpenWorld(p) || !p->IsAlive() || p->GetGroup() || p->GetLevel() < kMinLevel || !IsWorldBot(id))
+            continue;
+        uint8 const f = p->GetTeam() == ALLIANCE ? 0 : 1;
+        ++free_count[f];
+        lo[f] = std::min(lo[f], p->GetLevel());
+        hi[f] = std::max(hi[f], p->GetLevel());
+    }
+    for (uint8 f = 0; f < 2; ++f)
+    {
+        if (free_count[f] < kMinFree || (g_last_dungeon_ms[f] && now - g_last_dungeon_ms[f] < every))
+            continue;
+        g_last_dungeon_ms[f] = now ? now : 1u;
+        ::Playerbot::V2::GroupRequest req{};
+        req.source = ::Playerbot::V2::CoordSignal::GuildEventForming;
+        req.content_id = 3;   // dungeon night: the builder's follow-up queues the leader for a dungeon of its level
+        req.required = 5;
+        req.want_tank = 1;
+        req.want_healer = 1;
+        req.want_dps = 3;
+        req.faction_mask = f == 0 ? 1u : 2u;
+        req.level_min = kMinLevel;
+        req.level_max = std::min<uint8>(uint8(hi[f]), uint8(kMinLevel + 9));
+        uint32 const invited = Services::GroupBuilder().BuildGroup(req);
+        TC_LOG_INFO("playerbot.v2", "[dungeon_group] {}: {} free bots of {}+ (levels {}-{}), builder invited {}", f == 0 ? "Alliance" : "Horde",
+            free_count[f], uint32(kMinLevel), uint32(lo[f]), uint32(hi[f]), invited);
+    }
+}
+
 } // namespace
 
 bool Enabled() { return sConfigMgr->GetBoolDefault("Playerbot.World.QuestParties", false, true); }
@@ -290,7 +342,10 @@ void Drive(uint32 now_ms)
     static uint32 last = 0;
     if (now_ms - last < kTickMs) return;
     last = now_ms;
-    if (!Enabled() || !Services::Initialized())
+    if (!Services::Initialized())
+        return;
+    DriveDungeonGroups(now_ms);
+    if (!Enabled())
         return;
     Maintain(now_ms);
     Form(now_ms);

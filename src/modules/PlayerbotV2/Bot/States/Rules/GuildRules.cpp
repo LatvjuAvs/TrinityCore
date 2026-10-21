@@ -17,6 +17,7 @@
 // faction lookups). The set_last_rule_fired tag is the legacy one for
 // /diag and /history compatibility.
 
+#include <cmath>
 #include "Bot/States/MaintainHelpers.h"   // local (M7)
 #include "GameTime.h"
 #include "Bot/IdleRule.h"
@@ -54,10 +55,31 @@ inline ::Playerbot::V2::BotGuildMgr::Faction FactionOf(BotSnapshotView const& s)
 // out. Live 2026-10-21: founders elected after a restart stood in the Barrens and in Darnassus, "phase 0 STUCK" for minutes.
 bool TravelToRegistrar(BotSnapshotView const& s, BotAI& ai, BotIntentEmitter& emit, ::Playerbot::V2::BotGuildMgr::Faction f)
 {
+    // The faction's guild masters (creature_template npcflag PETITIONER): the nearest one on the bot's own continent, else the
+    // faction capital's. Live 2026-10-21: a Darnassus founder never found a route to Stormwind; Darnassus has its own.
+    struct Registrar { bool alliance; uint32 map; float x, y, z; };
+    static constexpr Registrar kRegistrars[] = {
+        { true, 0, -8885.0f, 614.0f, 95.0f },    // Aldwin Laughlin, Stormwind
+        { true, 0, -5016.0f, -997.0f, 504.0f },  // Jondor Steelbrow, Ironforge
+        { true, 1, 10076.0f, 2200.0f, 1347.0f }, // Lysheana, Darnassus
+        { false, 1, 1576.0f, -4293.0f, 26.0f },  // Urtrun Clanbringer, Orgrimmar
+        { false, 0, 1591.0f, 204.0f, -55.0f },   // Christopher Drakul, Undercity
+        { false, 1, -1292.0f, 127.0f, 131.0f },  // Krumn, Thunder Bluff
+    };
     bool const alliance = f == ::Playerbot::V2::BotGuildMgr::FACTION_ALLIANCE;
-    uint32 const map = alliance ? 0u : 1u;
-    float const tx = alliance ? -8889.0f : 1565.0f, ty = alliance ? 607.0f : -4319.0f, tz = alliance ? 95.3f : 23.3f;
     float bx, by, bz; s.position(bx, by, bz);
+    Registrar const* pick = nullptr;
+    float best = 0.f;
+    for (Registrar const& r : kRegistrars)
+    {
+        if (r.alliance != alliance || r.map != s.map_id()) continue;
+        float const d = std::hypot(r.x - bx, r.y - by);
+        if (!pick || d < best) { pick = &r; best = d; }
+    }
+    if (!pick)
+        pick = alliance ? &kRegistrars[0] : &kRegistrars[3];
+    uint32 const map = pick->map;
+    float const tx = pick->x, ty = pick->y, tz = pick->z;
     if (States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, map, tx, ty, tz, /*quest_goal=*/false)
         || (s.map_id() == map && States::ChunkedWalkToward(s, ai, emit, tx, ty, tz, "idle:guild_charter_drive:travel", GameTime::GetGameTimeMS())))
     {
