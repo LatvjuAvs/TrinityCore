@@ -18201,7 +18201,10 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
             // Inside? — server fires credit on its own per-tick world update;
             // we just need to wait one snapshot cycle. Mark fired with an
             // ":in" suffix so /history shows the bot is on-trigger.
-            const float arrived = at.radius > 2.f ? (at.radius - 2.f) : at.radius;
+            // Local (M7): the radius is max(radius, box length, box width), which for a box trigger reaches far outside
+            // it (live 2026-10-22: Oriandel stopped 35 y from the Fargodeep Mine trigger 197's centre, "inside", and the
+            // server's IsInAreaTrigger said no). The centre is inside every shape: walk to within 4 y of it.
+            const float arrived = std::min(at.radius > 2.f ? (at.radius - 2.f) : at.radius, 4.0f);
             if (dsq <= arrived * arrived)
             {
                 // Local (M7): world area triggers are reported by the client (CMSG_AREA_TRIGGER), and a bot has none, so
