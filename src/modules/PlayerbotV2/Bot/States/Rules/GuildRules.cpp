@@ -17,6 +17,8 @@
 // faction lookups). The set_last_rule_fired tag is the legacy one for
 // /diag and /history compatibility.
 
+#include "Bot/States/MaintainHelpers.h"   // local (M7)
+#include "GameTime.h"
 #include "Bot/IdleRule.h"
 #include "Group/GroupSnapshot.h"
 #include "Bot/BotAI.h"
@@ -45,6 +47,24 @@ inline ::Playerbot::V2::BotGuildMgr::Faction FactionOf(BotSnapshotView const& s)
     return (Player::TeamForRace(s.race()) == ALLIANCE)
         ? ::Playerbot::V2::BotGuildMgr::FACTION_ALLIANCE
         : ::Playerbot::V2::BotGuildMgr::FACTION_HORDE;
+}
+
+// Local (M7): a founder that cannot see a guild master travels to its faction's registrar plaza (the spots BotGuildMgr
+// teleports the founder and signers to at election), instead of waiting in phase 0/1/4 until the 30 minute budget runs
+// out. Live 2026-10-21: founders elected after a restart stood in the Barrens and in Darnassus, "phase 0 STUCK" for minutes.
+bool TravelToRegistrar(BotSnapshotView const& s, BotAI& ai, BotIntentEmitter& emit, ::Playerbot::V2::BotGuildMgr::Faction f)
+{
+    bool const alliance = f == ::Playerbot::V2::BotGuildMgr::FACTION_ALLIANCE;
+    uint32 const map = alliance ? 0u : 1u;
+    float const tx = alliance ? -8889.0f : 1565.0f, ty = alliance ? 607.0f : -4319.0f, tz = alliance ? 95.3f : 23.3f;
+    float bx, by, bz; s.position(bx, by, bz);
+    if (States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, map, tx, ty, tz, /*quest_goal=*/false)
+        || (s.map_id() == map && States::ChunkedWalkToward(s, ai, emit, tx, ty, tz, "idle:guild_charter_drive:travel", GameTime::GetGameTimeMS())))
+    {
+        ai.set_last_rule_fired("idle:guild_charter_drive:travel");
+        return true;
+    }
+    return false;
 }
 
 // ---------- Shared "guildless + quiet" outer gate ----------
@@ -122,6 +142,7 @@ bool CharterDriveFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
                     bxd, byd, bzd,
                     uint32(s.raw().combat.nearby_friends.size()));
             }
+            return TravelToRegistrar(s, ai, emit, kFaction);   // local (M7)
         }
     }
 
@@ -166,7 +187,7 @@ bool CharterDriveFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
             // Fall through with pet_npc null; phase 3 block below
             // handles it without dereferencing pet_npc.
             if (phase == 1 || phase == 4)
-                return false;
+                return TravelToRegistrar(s, ai, emit, kFaction);   // local (M7): was "wait until it drifts back into scan"
             // phase 3 falls through. Bail on the dist_sq math below.
         }
 

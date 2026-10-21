@@ -149,7 +149,7 @@ bool GatherDetourFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
     float bx, by, bz; s.position(bx, by, bz);
     constexpr float kInteract = 5.0f;
     constexpr float kInt2 = kInteract * kInteract;
-    constexpr float kDetour = 12.0f;
+    constexpr float kDetour = 30.0f;   // local (M7): was 12 y, 3 nodes gathered in 25 minutes; players detour further for a herb
     constexpr float kDet2 = kDetour * kDetour;
     NearbyObject const* best = nullptr;
     float best_dsq = kDet2;
