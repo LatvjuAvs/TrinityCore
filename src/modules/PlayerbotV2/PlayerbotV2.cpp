@@ -1079,6 +1079,8 @@ static void DrivePetSnap(uint32 now_ms)
             it = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(it->first)) ? std::next(it) : state.erase(it);
 }
 
+namespace { void DriveDeathLoopRescues(); }   // local (M7), defined next to Module::OnDeath
+
 void Module::OnWorldUpdate(std::chrono::milliseconds diff)
 {
     if (!initialized_) return;
@@ -1097,6 +1099,7 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
         if (total - last_hint_check >= std::chrono::milliseconds(2000))
         {
             last_hint_check = total;
+            DriveDeathLoopRescues();   // local (M7)
             SendDueAddonHints();
         }
     }
@@ -2930,6 +2933,65 @@ void LogPlayerDeath(Player* vp, Unit* killer, BotAI const* vai)
 
 } // namespace
 
+// Local (WoW Forever local server, M7): death-loop rescue, Playerbot.World.DeathLoopRescue (default off). A world bot that dies
+// kDeathLoopCount times within kDeathLoopWindowMs (live 2026-10-21: a level 7 rogue died 610 times overnight at the Raven
+// Hill graveyard among level 20+ skeletons) is revived and sent home to its homebind, as a player would take the spirit
+// healer and hearth out. World thread only (OnDeath and OnWorldUpdate), so no lock.
+namespace {
+constexpr uint32 kDeathLoopCount = 4;
+constexpr uint32 kDeathLoopWindowMs = 15u * 60u * 1000u;
+std::unordered_map<uint64, std::vector<uint32>> g_recent_deaths;
+std::unordered_map<uint64, uint32> g_rescue_pending;   // guid -> time the loop was detected
+
+bool DeathLoopRescueEnabled() { return sConfigMgr->GetBoolDefault("Playerbot.World.DeathLoopRescue", false, true); }
+
+void NoteBotDeathForRescue(Player* vp)
+{
+    if (!DeathLoopRescueEnabled() || vp->GetGroup()) return;
+    uint64 const guid = vp->GetGUID().GetCounter();
+    if (Services::Owners().GetOwner(guid).account_id != 0) return;   // a player's companion: its owner handles it
+    uint32 const now = GameTime::GetGameTimeMS();
+    std::vector<uint32>& d = g_recent_deaths[guid];
+    d.push_back(now);
+    std::erase_if(d, [now](uint32 t) { return now - t > kDeathLoopWindowMs; });
+    if (d.size() >= kDeathLoopCount)
+    {
+        g_rescue_pending[guid] = now ? now : 1u;
+        d.clear();
+    }
+}
+
+void DriveDeathLoopRescues()
+{
+    for (auto it = g_rescue_pending.begin(); it != g_rescue_pending.end();)
+    {
+        Player* bot = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(it->first));
+        if (!bot || !bot->IsInWorld())
+        {
+            it = g_rescue_pending.erase(it);
+            continue;
+        }
+        if (bot->IsBeingTeleported() || (bot->IsAlive() && bot->IsInCombat()))
+        {
+            ++it;
+            continue;
+        }
+        uint32 const from_map = bot->GetMapId();
+        float const fx = bot->GetPositionX(), fy = bot->GetPositionY();
+        if (!bot->IsAlive())
+        {
+            bot->ResurrectPlayer(0.5f);
+            bot->SpawnCorpseBones();
+        }
+        bot->TeleportTo(bot->m_homebind);
+        TC_LOG_INFO("playerbot.v2", "[death_loop_rescue] {} L{}: {} deaths within {} min at map {} ({:.0f},{:.0f}), sent home to map {} ({:.0f},{:.0f})",
+            bot->GetName(), uint32(bot->GetLevel()), kDeathLoopCount, kDeathLoopWindowMs / 60000u, from_map, fx, fy,
+            bot->m_homebind.GetMapId(), bot->m_homebind.GetPositionX(), bot->m_homebind.GetPositionY());
+        it = g_rescue_pending.erase(it);
+    }
+}
+} // namespace
+
 void Module::OnDeath(Unit* victim, Unit* killer)
 {
     if (!initialized_ || !victim) return;
@@ -2952,6 +3014,8 @@ void Module::OnDeath(Unit* victim, Unit* killer)
             DeathHotspots::Instance().NoteDeath(vp->GetMapId(), vp->GetPositionX(), vp->GetPositionY(),
                                                 uint8(killer->GetLevel()), uint64(GameTime::GetGameTime()));
         LogPlayerDeath(vp, killer, vai);
+        if (vai)
+            NoteBotDeathForRescue(vp);
         return;
     }
 

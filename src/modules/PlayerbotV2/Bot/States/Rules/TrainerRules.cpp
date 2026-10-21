@@ -16,6 +16,7 @@
 #include "Log.h"
 #include "UnitDefines.h"
 #include "Bot/World/ClassTrainerIndex.h"
+#include "Bot/States/MaintainHelpers.h"
 #include <cmath>
 
 namespace Playerbot {
@@ -98,11 +99,22 @@ bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
             (GameTime::GetGameTimeMS() - trip.since_ms) / 1000u);
         return false;
     }
-    float const dist = std::sqrt(d2);
-    float const scale = (dist - 3.0f) / dist;   // stop inside the interact ring
-    emit.move_to(bx + dx * scale, by + dy * scale, trip.z, /*run*/ true);
-    ai.set_last_rule_fired("idle:class_trainer_trip");
-    return true;
+    // Like the RPG trips (RpgRules.cpp): the travel planner (roads, graph) for a long way, a chunked walk for the last part.
+    // A single long move_to is refused by the path API (Locked) and only piles up [move_blocked].
+    uint32 const now_ms = GameTime::GetGameTimeMS();
+    if (std::sqrt(d2) > 250.0f
+        && States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, trip.map, trip.x, trip.y, trip.z, /*quest_goal=*/false))
+    {
+        ai.set_last_rule_fired("idle:class_trainer_trip");
+        return true;
+    }
+    if (States::ChunkedWalkToward(s, ai, emit, trip.x, trip.y, trip.z, "idle:class_trainer_trip", now_ms))
+        return true;
+    // No way there from here this time: give the trip up (the next level-up sets a new one).
+    ai.clear_trainer_trip();
+    TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} gave up the trip to its class trainer ({:.0f} y left)", s.name(), uint32(s.level()),
+        std::sqrt(d2));
+    return false;
 }
 
 // ---------- idle:dual_spec_switch ----------
