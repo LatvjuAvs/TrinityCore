@@ -5,6 +5,8 @@
 #include "Player.h"
 #include "QuestDef.h"
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 #include <array>
 #include <mutex>
 #include <shared_mutex>
@@ -118,13 +120,28 @@ void RefreshFleetStuckQuests(uint32 now_ms)
             do out.insert(at->Fetch()[0].GetUInt32()); while (at->NextRow());
         return out;
     }();
+    // Playerbot.World.FleetStuckRetry: quest ids (comma separated) kept off the list, to test a fix on them.
+    static std::unordered_set<uint32> const s_retry = []
+    {
+        std::unordered_set<uint32> out;
+        std::string const v = sConfigMgr->GetStringDefault("Playerbot.World.FleetStuckRetry", "", true);
+        size_t i = 0;
+        while (i < v.size())
+        {
+            size_t j = v.find(',', i);
+            if (j == std::string::npos) j = v.size();
+            if (uint32 const q = uint32(std::strtoul(v.substr(i, j - i).c_str(), nullptr, 10))) out.insert(q);
+            i = j + 1;
+        }
+        return out;
+    }();
     std::unordered_set<uint32> fresh;
     std::string list;
     if (r)
         do
         {
             Field* f = r->Fetch();
-            if (s_trigger_quests.contains(f[0].GetUInt32()))
+            if (s_trigger_quests.contains(f[0].GetUInt32()) || s_retry.contains(f[0].GetUInt32()))
                 continue;
             fresh.insert(f[0].GetUInt32());
             if (list.size() < 400)
