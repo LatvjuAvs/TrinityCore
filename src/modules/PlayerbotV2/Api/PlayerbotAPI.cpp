@@ -5133,7 +5133,11 @@ static bool BotWantsTradeGoodsSubclass(Player const* p, uint32 subclass)
 static uint32 CountFreeBagSlots(Player const* p)
 {
     uint32 free = 0;
-    for (uint8 s = INVENTORY_SLOT_ITEM_START; s < INVENTORY_SLOT_ITEM_END; ++s)
+    // Local fix: only the backpack slots the character has (16, or 20 with the account-secured bonus). INVENTORY_SLOT_ITEM_END
+    // is 63 in this core (28 slots), so 8-12 slots that do not exist counted as free: make_room never cleared bag rot,
+    // sell_trash never saw tight bags, and bots walked to a capital with full bags (2026-10-21).
+    uint8 const end = uint8(INVENTORY_SLOT_ITEM_START + p->GetInventorySlotCount());
+    for (uint8 s = INVENTORY_SLOT_ITEM_START; s < end && s < INVENTORY_SLOT_ITEM_END; ++s)
         if (!p->GetItemByPos(INVENTORY_SLOT_BAG_0, s))
             ++free;
     for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)

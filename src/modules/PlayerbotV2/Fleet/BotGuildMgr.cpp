@@ -34,6 +34,7 @@
 #include "../Util/ConfigReader.h"
 #include "../Bot/BotIntent.h"
 #include "../Threading/IntentQueue.h"
+#include "Config.h"
 #include <algorithm>
 
 namespace {
@@ -215,7 +216,10 @@ bool BotGuildMgr::EnsureFounderElected(Faction f)
     //    placement all done — so the founder is ready to act.
     const uint32 charter_cost = sWorld->getIntConfig(CONFIG_CHARTER_COST_GUILD);
     const uint32 min_money    = charter_cost * 12 / 10;       // 1.2× reserve
-    const uint8  min_level    = kCharterMinFounderLevel;
+    // Local (M7): Playerbot.World.GuildFounderMinLevel (default the upstream 25). A FreshStart world has no level 25 bot for
+    // hours; vanilla lets anyone found a guild (10 s charter, 9 signatures).
+    static uint8 const min_level = uint8(std::clamp(sConfigMgr->GetIntDefault("Playerbot.World.GuildFounderMinLevel",
+        int32(kCharterMinFounderLevel), true), 1, 80));
 
     // TC's `characters` table has no `guildid` column — guild membership
     // lives in `guild_member.guid -> guildid`. LEFT JOIN + IS NULL is the
