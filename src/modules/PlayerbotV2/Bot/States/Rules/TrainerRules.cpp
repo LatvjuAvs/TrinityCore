@@ -18,6 +18,8 @@
 #include "Bot/World/ClassTrainerIndex.h"
 #include "Bot/States/MaintainHelpers.h"
 #include <cmath>
+#include <mutex>
+#include <unordered_map>
 
 namespace Playerbot {
 
@@ -73,6 +75,24 @@ bool TrainerFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,B
 // idle:trainer (priority 230, just below) buys what the bot can afford. Gives up after 20 minutes or on another map.
 constexpr uint32 kTripTimeoutMs = 20u * 60u * 1000u;
 
+// Once a minute per bot: where the trip stands and what the rule did (diagnosis of trips that never arrive).
+void TripTrace(BotSnapshotView const& s, BotAI::TrainerTrip const& trip, float dist, char const* branch, bool ok)
+{
+    static std::mutex mtx;
+    static std::unordered_map<uint64, uint32> last;
+    uint32 const now = GameTime::GetGameTimeMS();
+    {
+        std::lock_guard lk(mtx);
+        uint32& l = last[s.bot_id()];
+        if (l && now - l < 60000u) return;
+        l = now ? now : 1u;
+    }
+    float bx, by, bz; s.position(bx, by, bz);
+    TC_LOG_INFO("playerbot.v2", "[trip_trace] {} L{} at ({:.0f},{:.0f},{:.0f}) to ({:.0f},{:.0f},{:.0f}) d={:.0f} after {} s: {} {} blocked={} moving={}",
+        s.name(), uint32(s.level()), bx, by, bz, trip.x, trip.y, trip.z, dist, (now - trip.since_ms) / 1000u, branch, ok ? "ok" : "no",
+        uint32(s.path_blocked_count()), s.is_moving() ? 1 : 0);
+}
+
 bool ClassTrainerTripGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, uint32)
 {
     BotAI::TrainerTrip const trip = ai.trainer_trip();
@@ -120,16 +140,20 @@ bool ClassTrainerTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
     {
         if (emit.move_to(trip.x, trip.y, trip.z, /*run*/ true) || emit.move_already_emitted(trip.x, trip.y, trip.z))
         {
+            TripTrace(s, trip, dist, "near", true);
             ai.set_last_rule_fired("idle:class_trainer_trip");
             return true;
         }
     }
     else if (States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, trip.map, trip.x, trip.y, trip.z, /*quest_goal=*/false))
     {
+        TripTrace(s, trip, dist, "plan", true);
         ai.set_last_rule_fired("idle:class_trainer_trip");
         return true;
     }
-    if (States::ChunkedWalkToward(s, ai, emit, trip.x, trip.y, trip.z, "idle:class_trainer_trip", now_ms))
+    bool const walked = States::ChunkedWalkToward(s, ai, emit, trip.x, trip.y, trip.z, "idle:class_trainer_trip", now_ms);
+    TripTrace(s, trip, dist, "chunk", walked);
+    if (walked)
         return true;
     return false;   // nothing this tick; other rules run, the trip stays until it arrives or times out
 }
