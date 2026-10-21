@@ -82,7 +82,7 @@ constexpr float  kTripProgressYd = 15.0f;
 
 bool TripStalled(BotSnapshotView const& s, BotAI::TrainerTrip const& trip, float dist)
 {
-    struct Progress { uint32 since = 0; float best = 0.f; uint32 best_ms = 0; };
+    struct Progress { uint32 since = 0; float best = 0.f; uint32 best_ms = 0; uint32 seen_ms = 0; };
     static std::mutex mtx;
     static std::unordered_map<uint64, Progress> prog;
     uint32 const now = GameTime::GetGameTimeMS();
@@ -93,8 +93,13 @@ bool TripStalled(BotSnapshotView const& s, BotAI::TrainerTrip const& trip, float
         p.since = trip.since_ms;
         p.best = dist;
         p.best_ms = now;
+        p.seen_ms = now;
         return false;
     }
+    // The clock stops while the rule does not run (a fight, a meal, a quest turn-in ahead of it): only walking time counts.
+    if (now - p.seen_ms > 10000u)
+        p.best_ms += now - p.seen_ms;
+    p.seen_ms = now;
     return now - p.best_ms >= kTripStallMs;
 }
 
