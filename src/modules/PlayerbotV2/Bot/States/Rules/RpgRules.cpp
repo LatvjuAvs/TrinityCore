@@ -35,6 +35,8 @@
 // (has_actionable_quest). Town presence and destinations come from
 // TownNpcIndex (world spawn data, vanilla service flags only).
 
+#include "Config.h"   // local (M7)
+#include <algorithm>
 #include "Bot/IdleRule.h"
 #include "Group/GroupSnapshot.h"
 #include "Bot/BotAI.h"
@@ -81,7 +83,10 @@ constexpr float  kCityTripMaxDist = 3000.0f;
 constexpr uint32 kApproachTimeout = 40u * 1000u;
 constexpr uint32 kStaleVisitMs    = 120u * 1000u;
 constexpr uint32 kTripTimeout     = 20u * 60u * 1000u;
-constexpr uint8  kAhPostMinLevel  = 25;      // idle:ah_post_surplus lists from this level
+// Local (M7): Playerbot.Economy.AhMinLevel / AhTripMinMoney (defaults: upstream 25 and 1 gold). A FreshStart world is levels
+// 1-15 for its first day, so with the upstream gates no bot ever used the auction house.
+uint8 AhMinLevel() { static uint8 const v = uint8(std::clamp(sConfigMgr->GetIntDefault("Playerbot.Economy.AhMinLevel", 25, true), 1, 80)); return v; }
+uint32 AhTripMinMoney() { static uint32 const v = uint32(std::max(0, sConfigMgr->GetIntDefault("Playerbot.Economy.AhTripMinMoney", 10000, true))); return v; }
 constexpr uint32 kMin             = 60u * 1000u;
 
 float Dist2d(float ax, float ay, float bx, float by)
@@ -169,7 +174,7 @@ float Relevance(BotSnapshotView const& s, TownNpc const& n, bool grey, bool dama
     auto best = [&](float v) { if (v > r) r = v; };
     if ((n.npc_flags & UNIT_NPC_FLAG_VENDOR_MASK) && grey)        best(100.0f);
     if ((n.npc_flags & UNIT_NPC_FLAG_REPAIR) && damaged)          best(95.0f);
-    if ((n.npc_flags & UNIT_NPC_FLAG_AUCTIONEER) && listable && s.level() >= kAhPostMinLevel) best(110.0f);
+    if ((n.npc_flags & UNIT_NPC_FLAG_AUCTIONEER) && listable && s.level() >= AhMinLevel()) best(110.0f);
     if ((n.npc_flags & UNIT_NPC_FLAG_TRAINER) && n.trainer_class != 0 && n.trainer_class == s.cls()) best(60.0f);
     if (n.npc_flags & UNIT_NPC_FLAG_INNKEEPER)                    best(25.0f);
     if (n.npc_flags & UNIT_NPC_FLAG_BANKER)                       best(15.0f);
@@ -551,9 +556,9 @@ bool AhTripGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, u
     auto const& st = ai.rpg();
     if (st.trip == kTripAh) return !s.is_moving();
     if (st.trip != kTripNone) return false;
-    if (s.level() < kAhPostMinLevel || now_ms < st.next_ah_trip_ms) return false;
+    if (s.level() < AhMinLevel() || now_ms < st.next_ah_trip_ms) return false;
     if (!MayIdle(s, now_ms) || s.is_moving()) return false;
-    if (s.gold() < 10000) return false;                    // listing deposits
+    if (s.gold() < AhTripMinMoney()) return false;         // listing deposits
     return AhListableCount(s) >= 2;
 }
 

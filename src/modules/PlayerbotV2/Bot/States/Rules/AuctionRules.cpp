@@ -4,6 +4,8 @@
 // the State_Idle linear cascade into the IdleRuleRegistry. Verbatim
 // behavior — pricing bands, undercut tolerance, level gate, lockouts.
 
+#include "Config.h"   // local (M7)
+#include <algorithm>
 #include "Bot/IdleRule.h"
 #include "Group/GroupSnapshot.h"
 #include "Bot/BotAI.h"
@@ -171,13 +173,16 @@ uint64 ApplyDynamicSellPrice(BotAI& ai, uint32 entry, uint64 buyout, uint64 floo
     return result;
 }
 
+// Local (M7): the same Playerbot.Economy.AhMinLevel as RpgRules (upstream 25).
+uint8 AhMinLevelLocal() { static uint8 const v = uint8(std::clamp(sConfigMgr->GetIntDefault("Playerbot.Economy.AhMinLevel", 25, true), 1, 80)); return v; }
+
 // ---------- idle:ah_post_surplus ----------
 bool PostSurplusGate(BotSnapshotView const& s, BotAI&, GroupSnapshotView const&,uint32)
 {
     if (!Services::Config().economy_bot_auctions_enabled()) return false;
     // Quest-first (2026-06-16): yield to a reachable quest action.
     if (s.has_actionable_quest()) return false;
-    if (s.level() < 25 || s.raw().movement.is_mounted) return false;
+    if (s.level() < AhMinLevelLocal() || s.raw().movement.is_mounted) return false;
     if (s.raw().inventory.bag_items.empty()) return false;
     return InRangeAuctioneer(s) != nullptr;
 }
@@ -309,7 +314,7 @@ bool CancelUndercutGate(BotSnapshotView const& s, BotAI&, GroupSnapshotView cons
     if (!Services::Config().economy_bot_auctions_enabled()) return false;
     // Quest-first (2026-06-16): yield to a reachable quest action.
     if (s.has_actionable_quest()) return false;
-    if (s.level() < 25 || s.raw().movement.is_mounted) return false;
+    if (s.level() < AhMinLevelLocal() || s.raw().movement.is_mounted) return false;
     if (s.raw().auction.auctions_owned.empty()) return false;
     if (s.raw().auction.ah_competing_buyout.empty()) return false;
     return InRangeAuctioneer(s) != nullptr;
