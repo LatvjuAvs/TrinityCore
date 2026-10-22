@@ -5565,8 +5565,22 @@ Result API::repair_all(ObjectGuid npc, bool from_guild_bank)
         for (uint8 i = 0; i < MAX_BAG_SIZE; ++i)
             collect(static_cast<uint16>((j << 8) | i));
 
+    // Local (M7): weapons first, as a player does (main hand, off hand, ranged), then the rest of what the bot wears, then its
+    // bags; cheapest first within each. Cheapest-first overall left the weapon, the costliest item, broken for good on a poor
+    // bot: 2026-10-22, 414 of 1,285 world-bot weapons at durability 0 and not one repaired in 30 minutes, while Oloria (level 6
+    // hunter) could neither shoot nor strike.
+    auto const repair_tier = [](uint16 pos) -> int
+    {
+        uint8 const bag = uint8(pos >> 8), slot = uint8(pos & 0xFF);
+        if (bag != INVENTORY_SLOT_BAG_0 || slot >= EQUIPMENT_SLOT_END) return 2;
+        return (slot == EQUIPMENT_SLOT_MAINHAND || slot == EQUIPMENT_SLOT_OFFHAND || slot == EQUIPMENT_SLOT_RANGED) ? 0 : 1;
+    };
     std::sort(repairables.begin(), repairables.end(),
-              [](auto const& a, auto const& b) { return a.second < b.second; });
+              [&](auto const& a, auto const& b)
+              {
+                  int const ta = repair_tier(a.first), tb = repair_tier(b.first);
+                  return ta != tb ? ta < tb : a.second < b.second;
+              });
 
     // Repair-reserve top-up â SAME stipend pattern as the flight reserve at
     // fly_to_node (owner directive 2026-06-21). Bots are perpetually broke
@@ -5586,15 +5600,25 @@ Result API::repair_all(ObjectGuid npc, bool from_guild_bank)
     }
 
     bool any = false;
+    uint32 fixed = 0, weapons = 0, skipped = 0;
+    uint64 paid = 0;
     for (auto const& [pos, cost] : repairables)
     {
-        // Cheapest-first: once the bot can't afford the next item, every costlier
-        // one is also unaffordable (money only ever decreases here), so stop.
+        // Weapons come first now, so an unaffordable one must not stop the cheaper armour after it (local, M7).
         if (!p_->HasEnoughMoney(cost))
-            break;
+        {
+            ++skipped;
+            continue;
+        }
         p_->DurabilityRepair(pos, /*takeCost*/ true, /*discountMod*/ 1.0f);
         any = true;
+        ++fixed;
+        paid += cost;
+        if (repair_tier(pos) == 0) ++weapons;
     }
+    if (!repairables.empty())
+        TC_LOG_INFO("playerbot.v2", "[repair] {} L{} repaired {} item(s) ({} weapon(s)) for {}c, {} left unpaid, {}c left", p_->GetName(),
+            uint32(p_->GetLevel()), fixed, weapons, paid, skipped, p_->GetMoney());
     // Locked == too poor to repair even the cheapest item; the rule treats this
     // as "tried" (5s lockout) and the bot keeps questing/earning until it can.
     return any ? Result::Ok : Result::Locked;
