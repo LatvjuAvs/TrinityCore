@@ -8,7 +8,13 @@
 #include "SpellMgr.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
+#include "Map.h"
 #include "Trainer.h"
+#include "GameTime.h"
+#include "Services.h"
+#include "Bot/BotRegistry.h"
+#include "Fleet/OwnerRegistry.h"
+#include <cmath>
 #include <mutex>
 #include <algorithm>
 #include <array>
@@ -245,6 +251,156 @@ void DriveRemoteTraining()
         }
         TC_LOG_INFO("playerbot.v2", "[earn_spells] {} L{} could not reach trainer {}: bought {} of {} spell(s) for {} copper ({} left)",
             bot->GetName(), uint32(bot->GetLevel()), spot.creature_entry, learned, can.size(), paid, bot->GetMoney());
+    }
+}
+
+// ---------- Local (M7): professions ----------
+namespace {
+struct Prof { uint32 spell; uint16 skill; char const* name; };
+constexpr Prof kHerb{ 2366, 182, "Herbalism" }, kMine{ 2575, 186, "Mining" }, kSkin{ 8613, 393, "Skinning" },
+               kAlch{ 2259, 171, "Alchemy" }, kSmith{ 2018, 164, "Blacksmithing" }, kLeather{ 2108, 165, "Leatherworking" },
+               kTailor{ 3908, 197, "Tailoring" }, kEngi{ 4036, 202, "Engineering" }, kEnch{ 7411, 333, "Enchanting" };
+
+// The two professions a bot of this class goes for (the first a gathering one), chosen once by its guid.
+std::pair<Prof, Prof> ProfessionPair(uint8 cls, uint64 guid)
+{
+    using P = std::pair<Prof, Prof>;
+    static std::unordered_map<uint8, std::vector<P>> const choices = {
+        { CLASS_WARRIOR, { { kMine, kSmith }, { kMine, kEngi }, { kMine, kSkin } } },
+        { CLASS_PALADIN, { { kMine, kSmith }, { kHerb, kMine } } },
+        { CLASS_HUNTER,  { { kSkin, kLeather }, { kSkin, kMine } } },
+        { CLASS_ROGUE,   { { kSkin, kLeather }, { kHerb, kAlch }, { kMine, kEngi } } },
+        { CLASS_PRIEST,  { { kHerb, kAlch }, { kTailor, kEnch } } },
+        { CLASS_MAGE,    { { kTailor, kEnch }, { kHerb, kAlch } } },
+        { CLASS_WARLOCK, { { kTailor, kEnch }, { kHerb, kAlch } } },
+        { CLASS_DRUID,   { { kHerb, kSkin }, { kSkin, kLeather }, { kHerb, kAlch } } },
+        { CLASS_SHAMAN,  { { kHerb, kAlch }, { kMine, kSkin }, { kSkin, kLeather } } },
+    };
+    auto it = choices.find(cls);
+    if (it == choices.end() || it->second.empty())
+        return { kHerb, kAlch };
+    return it->second[(guid * 2654435761ull >> 7) % it->second.size()];
+}
+
+struct ProfSpot { uint32 map; float x, y, z; uint32 entry; uint32 faction; };
+std::unordered_map<uint32, std::vector<ProfSpot>> const& ProfessionTrainers()
+{
+    static std::unordered_map<uint32, std::vector<ProfSpot>> spots;
+    static std::once_flag once;
+    std::call_once(once, []
+    {
+        if (QueryResult r = WorldDatabase.Query(
+                "SELECT ts.SpellId, c.map, c.position_x, c.position_y, c.position_z, ct.entry, ct.faction "
+                "FROM trainer_spell ts JOIN trainer t ON t.Id = ts.TrainerId AND t.Type = 2 "
+                "JOIN creature_trainer ctr ON ctr.TrainerID = t.Id JOIN creature_template ct ON ct.entry = ctr.CreatureID "
+                "JOIN creature c ON c.id = ct.entry "
+                "WHERE ts.SpellId IN (2366, 2575, 8613, 2259, 2018, 2108, 3908, 4036, 7411)"))
+            do
+            {
+                Field* f = r->Fetch();
+                spots[f[0].GetUInt32()].push_back({ f[1].GetUInt16(), f[2].GetFloat(), f[3].GetFloat(), f[4].GetFloat(),
+                                                    f[5].GetUInt32(), f[6].GetUInt16() });
+            } while (r->NextRow());
+        size_t n = 0;
+        for (auto const& [s, v] : spots) n += v.size();
+        TC_LOG_INFO("playerbot.v2", "[profession] trainer index: {} spawns for {} Apprentice professions", n, spots.size());
+    });
+    return spots;
+}
+
+std::mutex g_prof_mtx;
+std::unordered_map<uint64, ProfessionTrip> g_prof_trip;
+std::unordered_map<uint64, uint32> g_prof_retry_after;   // bot -> game ms before which no new trip is planned
+} // namespace
+
+bool ProfessionTripFor(uint64 bot_low, ProfessionTrip& out)
+{
+    std::lock_guard lk(g_prof_mtx);
+    auto it = g_prof_trip.find(bot_low);
+    if (it == g_prof_trip.end() || !it->second.active)
+        return false;
+    out = it->second;
+    return true;
+}
+
+void EndProfessionTrip(uint64 bot_low, uint32 retry_after_ms)
+{
+    std::lock_guard lk(g_prof_mtx);
+    g_prof_trip.erase(bot_low);
+    if (retry_after_ms)
+        g_prof_retry_after[bot_low] = GameTime::GetGameTimeMS() + retry_after_ms;
+}
+
+void PlanProfessionTrips(uint32 now_ms)
+{
+    static bool const enabled = sConfigMgr->GetBoolDefault("Playerbot.Bot.LearnProfessions", true, true);
+    static uint32 s_last = 0;
+    if (!enabled || (s_last && now_ms - s_last < 20000u))
+        return;
+    s_last = now_ms ? now_ms : 1u;
+    auto const& trainers = ProfessionTrainers();
+    std::vector<uint64> ids;
+    Services::Registry().for_each([&](auto id, auto const&) { ids.push_back(uint64(id)); });
+    uint32 planned = 0;
+    for (uint64 id : ids)
+    {
+        Player* bot = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(id));
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->GetLevel() < 5 || bot->IsInCombat() || bot->GetGroup() ||
+            bot->GetMap()->Instanceable() || bot->GetMoney() < 10)
+            continue;
+        if (Services::Owners().GetOwner(id).account_id != 0)
+            continue;   // a player's companion
+        {
+            std::lock_guard lk(g_prof_mtx);
+            if (g_prof_trip.contains(id))
+                continue;
+            if (auto r = g_prof_retry_after.find(id); r != g_prof_retry_after.end() && int32(r->second - now_ms) > 0)
+                continue;
+        }
+        // Two primary professions at most: bots set up at 10+ before FreshStart already hold two (granted by the setup).
+        static constexpr uint16 kPrimary[] = { 182, 186, 393, 171, 164, 165, 197, 202, 333 };
+        uint32 primaries = 0;
+        for (uint16 sk : kPrimary)
+            if (bot->HasSkill(sk)) ++primaries;
+        if (primaries >= 2)
+            continue;
+        auto const [a, b] = ProfessionPair(bot->GetClass(), id);
+        Prof const* want = nullptr;
+        for (Prof const* p : { &a, &b })
+            if (!bot->HasSkill(p->skill) && !bot->HasSpell(p->spell)) { want = p; break; }
+        if (!want)
+            continue;
+        auto it = trainers.find(want->spell);
+        if (it == trainers.end())
+            continue;
+        FactionTemplateEntry const* mine = bot->GetFactionTemplateEntry();
+        ProfSpot const* best = nullptr;
+        float best_d2 = 1500.f * 1500.f;
+        for (ProfSpot const& s : it->second)
+        {
+            if (s.map != bot->GetMapId())
+                continue;
+            if (mine)
+                if (FactionTemplateEntry const* theirs = sFactionTemplateStore.LookupEntry(s.faction))
+                    if (!mine->IsFriendlyTo(theirs) && !theirs->IsFriendlyTo(mine))
+                        continue;
+            float const d2 = bot->GetExactDist2dSq(s.x, s.y);
+            if (d2 < best_d2) { best_d2 = d2; best = &s; }
+        }
+        if (!best)
+        {
+            std::lock_guard lk(g_prof_mtx);
+            g_prof_retry_after[id] = now_ms + 30u * 60u * 1000u;   // none near: try again later, perhaps from elsewhere
+            continue;
+        }
+        {
+            std::lock_guard lk(g_prof_mtx);
+            g_prof_trip[id] = { true, want->spell, want->skill, best->map, best->x, best->y, best->z, best->entry, now_ms ? now_ms : 1u };
+        }
+        TC_LOG_INFO("playerbot.v2", "[profession] {} L{} goes to learn {} from trainer {} ({:.0f} y)", bot->GetName(),
+            uint32(bot->GetLevel()), want->name, best->entry, std::sqrt(best_d2));
+        if (++planned >= 10)
+            break;   // a few per pass: the world does not all rush to the trainers at once
     }
 }
 

@@ -70,6 +70,58 @@ bool TrainerFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,B
     return true;
 }
 
+// ---------- idle:profession_trip (local, M7) ----------
+// Walk to the profession trainer PlanProfessionTrips picked and buy Apprentice there (trainer_buy_all), as a player does.
+// Priority 699: a planned trip beats quest pursuit (698), or it never ran (lesson: rules below quest work starve).
+// Ends on arrival (with a 10 minute pause before another plan), after 15 minutes, or on another map (30 minute pause).
+bool ProfessionTripGate(BotSnapshotView const& s, BotAI&, GroupSnapshotView const&, uint32)
+{
+    if (s.in_combat() || s.is_casting() || s.raw().movement.is_mounted || s.in_group() || s.has_owner_character()) return false;
+    ::Playerbot::World::ProfessionTrip trip;
+    return ::Playerbot::World::ProfessionTripFor(s.bot_id(), trip);
+}
+
+bool ProfessionTripFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, BotIntentEmitter& emit, uint32)
+{
+    ::Playerbot::World::ProfessionTrip trip;
+    if (!::Playerbot::World::ProfessionTripFor(s.bot_id(), trip)) return false;
+    uint32 const now_ms = GameTime::GetGameTimeMS();
+    if (s.has_skill(trip.skill))
+    {
+        ::Playerbot::World::EndProfessionTrip(s.bot_id(), 0);
+        return false;
+    }
+    if (trip.map != s.map_id() || now_ms - trip.since_ms > 15u * 60u * 1000u)
+    {
+        TC_LOG_INFO("playerbot.v2", "[profession] {} gives up the trip to trainer {} (map {}, {} s)", s.name(), trip.creature_entry,
+            s.map_id(), (now_ms - trip.since_ms) / 1000u);
+        ::Playerbot::World::EndProfessionTrip(s.bot_id(), 30u * 60u * 1000u);
+        return false;
+    }
+    float bx, by, bz; s.position(bx, by, bz);
+    for (auto const& u : s.raw().combat.nearby_friends)
+        if (u.entry == trip.creature_entry && std::hypot(u.x - bx, u.y - by) <= 4.5f && std::fabs(u.z - bz) < 5.0f)
+        {
+            emit.trainer_buy_all(u.guid);
+            TC_LOG_INFO("playerbot.v2", "[profession] {} L{} reached trainer {} and buys Apprentice (spell {})", s.name(),
+                uint32(s.level()), trip.creature_entry, trip.spell);
+            ::Playerbot::World::EndProfessionTrip(s.bot_id(), 10u * 60u * 1000u);
+            ai.set_last_rule_fired("idle:profession_trip:buy");
+            return true;
+        }
+    float const dist = std::hypot(trip.x - bx, trip.y - by);
+    bool moved = false;
+    if (dist <= 250.0f)
+        moved = emit.move_to(trip.x, trip.y, trip.z, /*run*/ true) || emit.move_already_emitted(trip.x, trip.y, trip.z);
+    if (!moved && dist > 30.0f)
+        moved = States::DriveTravelPlanTo(s, ai, emit, bx, by, bz, trip.map, trip.x, trip.y, trip.z, /*quest_goal=*/false);
+    if (!moved)
+        moved = States::ChunkedWalkToward(s, ai, emit, trip.x, trip.y, trip.z, "idle:profession_trip", now_ms);
+    if (moved)
+        ai.set_last_rule_fired("idle:profession_trip");
+    return moved;
+}
+
 // ---------- idle:class_trainer_trip ----------
 // Local (M7, Playerbot.Bot.EarnSpells): walk to the class trainer Module::OnLevelUp picked. Within 5 y the trip ends and
 // idle:trainer (priority 230, just below) buys what the bot can afford. Gives up after 20 minutes or on another map.
@@ -241,6 +293,14 @@ void RegisterQuestPartyRules(IdleRuleRegistry& r);   // local (M7), QuestPartyRu
 void RegisterTrainerRules(IdleRuleRegistry& r)
 {
     RegisterQuestPartyRules(r);
+    {
+        IdleRule rule;
+        rule.name     = "idle:profession_trip";
+        rule.priority = 699;   // local (M7): above quest pursuit (698) while a trip is planned
+        rule.gate     = &ProfessionTripGate;
+        rule.fire     = &ProfessionTripFire;
+        r.register_rule(std::move(rule));
+    }
     {
         IdleRule rule;
         rule.name     = "idle:class_trainer_trip";

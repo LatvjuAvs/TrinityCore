@@ -34,4 +34,22 @@ bool NearestClassTrainer(Player* bot, float max_dist, ClassTrainerSpot& out);
 void QueueRemoteTraining(uint64 bot_low);
 void DriveRemoteTraining();
 
+// Local (M7): professions learned as a player does. A world bot from level 5 picks a gathering profession that suits its
+// class and a second one that goes with it (Herbalism + Alchemy, Mining + Blacksmithing, Skinning + Leatherworking, ...),
+// walks to the nearest friendly trainer for the one it lacks and buys Apprentice there (10 copper). Playerbot.Bot.LearnProfessions
+// (default 1). The plan is made on the world thread; idle:profession_trip walks it.
+struct ProfessionTrip
+{
+    bool   active = false;
+    uint32 spell = 0;            // the Apprentice spell (2366 Herbalism, 2575 Mining, ...)
+    uint16 skill = 0;            // its skill line (182, 186, ...)
+    uint32 map = 0;
+    float  x = 0.f, y = 0.f, z = 0.f;
+    uint32 creature_entry = 0;   // the trainer
+    uint32 since_ms = 0;
+};
+bool ProfessionTripFor(uint64 bot_low, ProfessionTrip& out);    // any thread
+void EndProfessionTrip(uint64 bot_low, uint32 retry_after_ms);  // any thread; 0 = may plan again at once
+void PlanProfessionTrips(uint32 now_ms);                        // world thread, every few seconds
+
 } // namespace Playerbot::World
