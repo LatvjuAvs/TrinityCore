@@ -5445,6 +5445,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
         // Local (M7): a quest party (Fleet/QuestParty.h) works on one quest together. Its objective counts as 300 y nearer,
         // so the members pick the same camp instead of each the nearest of their own and drifting apart.
         uint32 const party_quest = ::Playerbot::V2::QuestParty::PartyQuest(p->GetGUID().GetCounter());
+        bool const has_company = p->GetGroup() != nullptr;   // a quest party, a player's group (companions), a dungeon group
         auto const ranked = [party_quest](uint32 quest, float e) { return quest == party_quest ? std::max(0.f, e - 300.0f) : e; };
         for (auto const& q : snap->quest_log.quests)
         {
@@ -5471,6 +5472,11 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 if (uint32 reqSkill = qt->GetRequiredSkill())
                     if (const_cast<Player*>(p)->GetSkillValue(reqSkill) == 0)
                         continue;
+            // Local (M7): a group quest (QuestInfoID 1: Hogger, Chok'sul, ...) waits in the log until the bot has a group, as a
+            // player keeps one until he finds a group (Fleet/QuestParty.h forms parties on it first). A complete one is turned in.
+            if (q.state == 0 && !has_company)
+                if (Quest const* qt = sObjectMgr->GetQuestTemplate(q.quest_id); qt && qt->GetQuestInfoID() == QUEST_INFO_GROUP)
+                    continue;
             // Quest-level blacklist (audit C17): Tier-3 stuck recovery
             // (idle:unstick:drop_goal) calls blacklist_quest(), but only the
             // OFFER scan consulted it — the picker happily re-picked the same

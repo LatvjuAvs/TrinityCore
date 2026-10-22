@@ -30,6 +30,7 @@ namespace {
 constexpr uint32 kTickMs          = 20u * 1000u;
 constexpr float  kFormRange       = 100.0f;         // in the same zone; a mate out of /say range gets a whisper and walks over
 constexpr float  kSayRange        = 25.0f;
+constexpr float  kGroupQuestRange = 250.0f;         // a group quest (QuestInfoID 1) is worth a longer walk to find company
 constexpr uint8  kLevelSpread     = 2;              // at forming
 constexpr uint8  kLevelSpreadMax  = 3;              // a party whose levels drift further apart breaks up
 constexpr float  kApartRange      = 150.0f;
@@ -79,8 +80,18 @@ std::vector<uint32> OpenQuests(Player const* p)
     return out;
 }
 
+bool IsGroupQuest(uint32 q)
+{
+    Quest const* qt = sObjectMgr->GetQuestTemplate(q);
+    return qt && qt->GetQuestInfoID() == QUEST_INFO_GROUP;
+}
+
+// A shared group quest first: a solo bot does not pursue one (BotSnapshotBuilder), so a party is its only way to do it.
 uint32 SharedQuest(std::vector<uint32> const& a, std::vector<uint32> const& b)
 {
+    for (uint32 q : a)
+        if (IsGroupQuest(q) && std::find(b.begin(), b.end(), q) != b.end())
+            return q;
     for (uint32 q : a)
         if (std::find(b.begin(), b.end(), q) != b.end())
             return q;
@@ -156,11 +167,13 @@ void RefreshQuest(Party& party, Group* g, std::vector<Player*> const& ms)
     uint32 best = 0, best_n = 1;
     if (party.quest && std::find(mine.begin(), mine.end(), party.quest) != mine.end() && holders(party.quest) >= 2)
         return;
+    bool best_group = false;
     for (uint32 q : mine)
-        if (uint32 const n = holders(q); n > best_n)
+        if (uint32 const n = holders(q); n > best_n || (n == best_n && n >= 2 && !best_group && IsGroupQuest(q)))
         {
             best = q;
             best_n = n;
+            best_group = IsGroupQuest(q);
         }
     if (best == party.quest)
         return;
@@ -288,9 +301,10 @@ void Form(uint32 now)
             if (j == i || b.used) continue;
             if (b.p->GetTeam() != a.p->GetTeam() || b.p->GetMapId() != a.p->GetMapId()) continue;
             if (std::abs(int32(b.p->GetLevel()) - int32(a.p->GetLevel())) > kLevelSpread) continue;
-            if (b.p->GetZoneId() != a.p->GetZoneId() || b.p->GetExactDist2d(a.p) > kFormRange) continue;
+            if (b.p->GetZoneId() != a.p->GetZoneId() || b.p->GetExactDist2d(a.p) > kGroupQuestRange) continue;
             uint32 const q = SharedQuest(a.quests, b.quests);
             if (!q || (quest && q != quest)) continue;
+            if (b.p->GetExactDist2d(a.p) > kFormRange && !IsGroupQuest(q)) continue;
             quest = q;
             mates.push_back(&b);
         }
@@ -340,8 +354,8 @@ void Form(uint32 now)
             a.p->Say("Doing " + title + " too? Let's group up.", Tongue(a.p));
             mates.front()->p->Say(std::string_view("Sure, let's go."), Tongue(mates.front()->p));
         }
-        TC_LOG_INFO("playerbot.v2", "[quest_party] formed: {} (L{}, map {} zone {}) for quest {} \"{}\", {} min, {:.0f} y apart", names,
-            uint32(a.p->GetLevel()), a.p->GetMapId(), a.p->GetZoneId(), quest, title, minutes, far_d);
+        TC_LOG_INFO("playerbot.v2", "[quest_party] formed: {} (L{}, map {} zone {}) for {}quest {} \"{}\", {} min, {:.0f} y apart", names,
+            uint32(a.p->GetLevel()), a.p->GetMapId(), a.p->GetZoneId(), IsGroupQuest(quest) ? "group " : "", quest, title, minutes, far_d);
     }
 }
 
