@@ -20,7 +20,11 @@ struct IdleWatch
     float tx = 0.f, ty = 0.f, tz = 0.f;   // the place it was sent to
     bool has_target = false;
     char const* prev_rule = nullptr;      // the last rule other than the watch's own walk that moved or held the bot
+    bool hearthing = false;               // local (M7): the forced window holds the bot still while its hearthstone casts
 };
+
+constexpr std::uint32_t kIdleHearthStrikes = 8;     // local (M7): found standing this often in one spot, a bot hearths out
+constexpr std::uint32_t kIdleHearthHoldMs = 12000;  // the hearthstone is a 10 s cast that any move interrupts
 
 // The rules that walk a bot toward its quest objective. A bot found standing again and again while one of them was the last to hold
 // it cannot close that objective from here.

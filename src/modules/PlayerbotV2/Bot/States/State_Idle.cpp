@@ -20558,6 +20558,18 @@ void DispatchIdle(BotAI& ai,
             }
             float tx = 0.f, ty = 0.f, tz = pz;
             char const* what = "wander";
+            // Local (M7): wanders and hub walks have not got it out of this spot (Sorrel and Urien on a ledge of the Lordaeron ruins, 39
+            // strikes in 30 minutes, every way out over water or a drop): like a stuck player it uses its hearthstone, every 8th strike.
+            if (w.strikes >= V2::kIdleHearthStrikes && w.strikes % V2::kIdleHearthStrikes == 0 && s.can_hearth() && emit.hearth())
+            {
+                w.hearthing = true;
+                w.has_target = true;
+                w.forced_until_ms = now + V2::kIdleHearthHoldMs;
+                TC_LOG_INFO("playerbot.v2", "[idle] bot={} lvl={} map={} zone={} stuck in one spot (strikes={}, last_rule={}), hearths home",
+                    s.name(), uint32(s.level()), s.map_id(), s.zone_id(), w.strikes, w.prev_rule ? w.prev_rule : "-");
+                ai.set_last_rule_fired("idle:watch_hearth");
+                return;
+            }
             if (w.strikes >= 2)
             {
                 std::vector<::Playerbot::V2::Travel::QuestHub const*> near;
@@ -20602,13 +20614,23 @@ void DispatchIdle(BotAI& ai,
                 float const dist = 25.f + float((s.guid().GetCounter() + w.strikes * 7u) % 11u);
                 tx = px + std::cos(ang) * dist; ty = py + std::sin(ang) * dist;
             }
-            w.tx = tx; w.ty = ty; w.tz = tz; w.has_target = true;
+            w.tx = tx; w.ty = ty; w.tz = tz; w.has_target = true; w.hearthing = false;
             w.forced_until_ms = now + V2::kIdleForcedMs;
             (::Playerbot::V2::World::IsVanillaCapitalZone(s.zone_id()) ? ::Playerbot::V2::TownLife::Counters().idle_town : ::Playerbot::V2::TownLife::Counters().idle_field)
                 .fetch_add(1, std::memory_order_relaxed);
             TC_LOG_INFO("playerbot.v2", "[idle] bot={} lvl={} map={} zone={} stationary {}s last_rule={} strikes={} -> {} ({:.0f},{:.0f})",
                 s.name(), uint32(s.level()), s.map_id(), s.zone_id(), V2::kIdleStuckMs / 1000u,
                 ai.last_rule_fired() ? ai.last_rule_fired() : "-", w.strikes, what, tx, ty);
+        }
+        if (w.hearthing)
+        {
+            if (now < w.forced_until_ms && !s.in_combat())
+            {
+                ai.set_last_rule_fired("idle:watch_hearth");
+                return;   // stand still while the hearthstone casts
+            }
+            w.hearthing = false;
+            w.has_target = false;
         }
         if (w.has_target && !exempt)
         {
