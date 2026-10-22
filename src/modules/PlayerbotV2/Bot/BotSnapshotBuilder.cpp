@@ -58,6 +58,7 @@
 #include "CharacterCache.h"   // sCharacterCache for owner_name lookup
 #include "Fleet/OwnerRegistry.h"   // owner→character resolution for mat-share mail
 #include "Fleet/QuestParty.h"         // local (M7): the party quest biases the picker
+#include "Util/TaxiFare.h"          // local (M7): fresh-world bots pay their fare
 #include "Guild.h"           // Guild::Member, GetMember / GetRankId for Phase B
 #include "GuildMgr.h"        // sGuildMgr lookup of bot's guild for snapshot fields
 #include "GameObject.h"
@@ -10226,6 +10227,10 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 {
                     std::vector<uint32> route;
                     TaxiPathGraph::GetCompleteNodeRoute(from_e, to_e, p, route);
+                    // Local (M7): in a fresh world only a flight the bot can pay for (Util/TaxiFare.h); else it walks.
+                    if (route.size() >= 2 && ::Playerbot::V2::TaxiFare::PayOwnWay() &&
+                        p->GetMoney() < ::Playerbot::V2::TaxiFare::RouteFare(p, route))
+                        route.clear();
                     if (route.size() >= 2)
                     {
                         snap->travel.recommended_taxi_dest_node = best_dest;

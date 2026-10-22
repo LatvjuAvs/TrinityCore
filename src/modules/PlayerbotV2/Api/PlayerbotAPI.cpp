@@ -14,6 +14,7 @@
 #include "Bot/BotAI.h"
 #include "Bot/BotRegistry.h"
 #include "Services.h"
+#include "Util/TaxiFare.h"
 #include "Bot/Raid/ShieldRules.h"
 #include "BotItemScorer.h"
 #include "Player.h"
@@ -5579,7 +5580,8 @@ Result API::repair_all(ObjectGuid npc, bool from_guild_bank)
     {
         uint64 total_cost = 0;
         for (auto const& pr : repairables) total_cost += pr.second;
-        if (total_cost > 0 && p_->GetMoney() < total_cost)
+        // Local (M7): not in a fresh world (Util/TaxiFare.h): a poor bot repairs what it can afford, like a player.
+        if (total_cost > 0 && p_->GetMoney() < total_cost && !V2::TaxiFare::PayOwnWay())
             p_->ModifyMoney(int64(total_cost - p_->GetMoney()));
     }
 
@@ -8919,7 +8921,18 @@ Result API::fly_to_node(ObjectGuid flight_master, uint32 to_node)
     // ride is fine, and this is far cheaper than the leveling time lost to a bot
     // stranded on the wrong continent). 5g covers any single multi-hop route.
     constexpr uint64 kFlightReserve = 50000;   // 5 gold in copper
-    if (p_->GetMoney() < kFlightReserve)
+    if (V2::TaxiFare::PayOwnWay())
+    {
+        // Local (M7): a fresh world has no stipend (Util/TaxiFare.h); the planners only pick flights the bot can pay.
+        uint64 const fare = V2::TaxiFare::RouteFare(p_, nodes);
+        if (p_->GetMoney() < fare)
+        {
+            TC_LOG_INFO("playerbot.v2", "[fly_dbg] {} FAIL fare {} > money {} hops={}", p_->GetName(), fare, p_->GetMoney(),
+                uint32(nodes.size()));
+            return Result::NotEnoughResource;
+        }
+    }
+    else if (p_->GetMoney() < kFlightReserve)
         p_->ModifyMoney(int64(kFlightReserve - p_->GetMoney()));
     if (!p_->ActivateTaxiPathTo(nodes, unit, /*spellid*/ 0, /*preferredMountDisplay*/ 0))
     {

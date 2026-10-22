@@ -9,6 +9,7 @@
 #include "../Services.h"
 #include "../Bot/World/CapitalsTable.h"
 #include "../Bot/ClassTables.h"   // IsVanillaRealm
+#include "../Util/TaxiFare.h"
 
 #include "ConditionMgr.h"
 #include "CreatureData.h"
@@ -1303,6 +1304,11 @@ bool EdgeUsable(Player const* bot,
         if (!bot->m_taxi.IsTaximaskNodeKnown(dst_node.payload_id))
             return false;
     }
+    // Local (M7): in a fresh world a bot pays its own fare (Util/TaxiFare.h): a hop it cannot pay for is walked instead.
+    if (bot && edge.kind == EdgeKind::Taxi && edge.payload_id != 0 && ::Playerbot::V2::TaxiFare::PayOwnWay())
+        if (TaxiPathEntry const* tp = sTaxiPathStore.LookupEntry(edge.payload_id))
+            if (bot->GetMoney() < bot->ApplyClassicLegacyPriceMod(tp->Cost, 4))
+                return false;
     // Source-node ConditionMgr gate (rep, level, quest unlock).
     if (bot && src_node.condition_id != 0)
     {
