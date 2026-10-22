@@ -414,6 +414,10 @@ bool BotSetupPipeline::DoGrantStarterKit(Player* bot)
 
 bool BotSetupPipeline::DoGenerateGear(Player* bot)
 {
+    // Local (M7, FreshStart): a level 1-9 newcomer keeps the gear its character creation gave it and earns the rest
+    // (the world is meant to grow slowly and naturally).
+    if (sConfigMgr->GetBoolDefault("Playerbot.World.FreshStart", false, true) && bot->GetLevel() < 10)
+        return true;
     RollClassicRole(bot);
     Gear::GearGenerationContext ctx;
     ctx.level  = bot->GetLevel();

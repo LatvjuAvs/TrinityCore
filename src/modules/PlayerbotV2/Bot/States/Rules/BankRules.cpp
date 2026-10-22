@@ -88,23 +88,21 @@ bool GuildBankDepositFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView
 // us when no FM exists. We accept the small behavior gap: state clears
 // when the bot enters a state where the rule registry doesn't dispatch
 // taxi_discover (which still naturally happens on out-of-range).
+// Local (M7, FreshStart): flight paths are not handed out at login any more, so a bot passing a flight master within 40 y
+// walks over and learns it, as a player passing through a town does (in contact range only, this fired 0 times a night).
+// Once per flight master per bot (the last one is remembered); not in combat, a group, or with an owner.
+constexpr float kTaxiDiscoverWalkYd = 40.0f;
+
 bool TaxiDiscoverGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,uint32)
 {
+    if (s.in_combat() || s.is_casting() || s.has_owner_character() || s.in_group()) return false;
     auto const* fm = s.nearest_npc_with_flag(UNIT_NPC_FLAG_FLIGHTMASTER);
     if (!fm)
-    {
-        if (!ai.last_taxi_discover_fm().IsEmpty())
-            ai.set_last_taxi_discover_fm(ObjectGuid::Empty);
         return false;
-    }
     float bx, by, bz; s.position(bx, by, bz);
     const float dx = fm->x - bx, dy = fm->y - by, dz = fm->z - bz;
-    if (dx*dx + dy*dy + dz*dz > kInteractSq)
-    {
-        if (!ai.last_taxi_discover_fm().IsEmpty())
-            ai.set_last_taxi_discover_fm(ObjectGuid::Empty);
+    if (dx*dx + dy*dy + dz*dz > kTaxiDiscoverWalkYd * kTaxiDiscoverWalkYd)
         return false;
-    }
     return ai.last_taxi_discover_fm() != fm->guid;
 }
 
@@ -112,6 +110,14 @@ bool TaxiDiscoverFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
 {
     auto const* fm = s.nearest_npc_with_flag(UNIT_NPC_FLAG_FLIGHTMASTER);
     if (!fm) return false;
+    float bx, by, bz; s.position(bx, by, bz);
+    const float dx = fm->x - bx, dy = fm->y - by, dz = fm->z - bz;
+    if (dx*dx + dy*dy + dz*dz > kInteractSq)
+    {
+        emit.move_to(fm->x, fm->y, fm->z, /*run*/ false);
+        ai.set_last_rule_fired("idle:taxi_discover:walk");
+        return true;
+    }
     emit.discover_taxi_node(fm->guid);
     ai.set_last_taxi_discover_fm(fm->guid);
     ai.set_last_rule_fired("idle:taxi_discover");
@@ -148,12 +154,12 @@ void RegisterBankRules(IdleRuleRegistry& r)
     {
         IdleRule rule;
         rule.name     = "idle:taxi_discover";
-        rule.priority = 360;
+        rule.priority = 700;   // local (M7): a short walk to a flight master in view beats quest pursuit (698), once per master
         rule.gate     = &TaxiDiscoverGate;
         rule.fire     = &TaxiDiscoverFire;
         // Taxi discovery is a one-shot per flightmaster visit; the bot
         // is stationary at the flightmaster while it fires.
-        rule.min_interval_ms = 3000;
+        rule.min_interval_ms = 0;      // local (M7): it walks; a throttle lets other rules move the bot away
         r.register_rule(std::move(rule));
     }
 }

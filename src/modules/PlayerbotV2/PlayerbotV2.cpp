@@ -2643,7 +2643,10 @@ void Module::OnPlayerLogin(Player* p)
     // the mask persists in the character taximask column, so a one-time learn on
     // login repairs the whole fleet. (Sub-10 bots stay same-map via the relocation
     // band gate regardless, so a full mask doesn't send them cross-continent.)
-    if (uint32 fp = ::Playerbot::V2::World::LearnAllFactionFlightpaths(p))
+    // Local (M7, FreshStart): no flight paths for free; a bot learns each one at its flight master (idle:taxi_discover), as
+    // a player does. Bots that already learned them keep them (the mask is saved).
+    static bool const s_fresh_world = sConfigMgr->GetBoolDefault("Playerbot.World.FreshStart", false, true);
+    if (uint32 fp = s_fresh_world ? 0u : ::Playerbot::V2::World::LearnAllFactionFlightpaths(p))
         TC_LOG_INFO("playerbot.v2",
             "[FlightLearn] {} learned {} flight paths on login (taxi network now routable)",
             p->GetName(), fp);
