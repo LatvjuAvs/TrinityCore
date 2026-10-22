@@ -2717,6 +2717,10 @@ bool API::TrySwimCrossing(float x, float y, float z, bool run)
     }
     if (!water || !landing)
         return false;
+    // A swim lands near the water level; a landing far above or below is a bridge or a cliff top found by the height probe
+    // (live: Hawk "swam" from the Stormwind moat up onto the bridge deck, 30 y up).
+    if (std::fabs(lz - bz) > 8.0f)
+        return false;
     last = now ? now : 1u;
     p_->SetWalk(!run);
     p_->GetMotionMaster()->MovePoint(0, lx, ly, lz, /*generatePath*/ false);
