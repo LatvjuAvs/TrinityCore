@@ -3554,8 +3554,10 @@ public:
     // kept (BotAccountMgr is told each character was removed so the
     // per-account character count drops, and the pool reuses these
     // accounts for the fresh wave of spawns).
-    static bool HandleWipeFleet(ChatHandler* handler, Optional<std::string> confirm_arg)
+    static bool HandleWipeFleet(ChatHandler* handler, Optional<std::string> confirm_arg, Optional<std::string> scope_arg)
     {
+        // Local (M7): a player's companions (owner_account_id set) are kept unless the scope is "all".
+        bool const all = scope_arg && *scope_arg == "all";
         if (!Playerbot::Services::Initialized())
         { handler->SendSysMessage("PlayerbotV2 not initialized."); return true; }
 
@@ -3574,7 +3576,7 @@ public:
         // slot via BotAccountMgr after the character is gone.
         auto res = CharacterDatabase.PQuery(
             "SELECT pv.character_guid_low, c.account FROM playerbot_v2_character pv "
-            "JOIN characters c ON c.guid = pv.character_guid_low");
+            "JOIN characters c ON c.guid = pv.character_guid_low{}", all ? "" : " WHERE pv.owner_account_id = 0");
         if (!res || !res->GetRowCount())
         {
             handler->SendSysMessage("WipeFleet: no V2 bots to delete.");
@@ -3630,8 +3632,8 @@ public:
         // Drop residual playerbot_v2_character rows in one shot. Some may
         // already be gone if Player::DeleteFromDB cascaded into our table
         // (it doesn't, currently â but harmless to run unconditionally).
-        CharacterDatabase.DirectExecute(
-            "DELETE FROM playerbot_v2_character");
+        CharacterDatabase.DirectExecute(all ? "DELETE FROM playerbot_v2_character"
+                                            : "DELETE FROM playerbot_v2_character WHERE owner_account_id = 0");
 
         // Seed the fleet with a burst of immediate spawns so the rebuild is
         // visible right away. The default per-cycle throttle (5 spawns / 60s)
