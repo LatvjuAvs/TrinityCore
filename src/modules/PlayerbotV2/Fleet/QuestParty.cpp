@@ -205,12 +205,19 @@ void Maintain(uint32 now)
         {
             uint8 lo = 255, hi = 0;
             bool apart = false, instance = false;
+            // Distance counts among the living only: a dead member's ghost starts at a graveyard and its corpse run often
+            // takes more than kApartMs; friends wait for it (2026-10-22: 7 of 11 "apart" break-ups followed a death).
+            Player const* ref = nullptr;
+            for (Player* p : ms)
+                if (p->IsAlive() && (!ref || p->GetGUID() == g->GetLeaderGUID()))
+                    ref = p;
             for (Player* p : ms)
             {
                 lo = std::min(lo, p->GetLevel());
                 hi = std::max(hi, p->GetLevel());
                 if (!p->IsBeingTeleported() && !InOpenWorld(p)) instance = true;   // a teleport (death-loop rescue) is not an instance
-                if (p->GetMapId() != ms.front()->GetMapId() || p->GetExactDist2d(ms.front()) > kApartRange) apart = true;
+                if (ref && p != ref && p->IsAlive() && (p->GetMapId() != ref->GetMapId() || p->GetExactDist2d(ref) > kApartRange))
+                    apart = true;
             }
             if (hi - lo > kLevelSpreadMax)
                 why = "levels";
