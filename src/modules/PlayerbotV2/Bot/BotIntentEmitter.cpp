@@ -256,7 +256,7 @@ bool BotIntentEmitter::start_attack(ObjectGuid target)
         // 3,116 give-ups in 18 minutes, most on Mottled Boars in the Valley of Trials). Short shields (8-30 s) are re-engage
         // pacing, not a give-up, and are left alone; so is the solo flee's 60 s shield (the first version caught it, and deaths
         // while fleeing doubled: 33 -> 65 in 18 minutes). Without a snapshot the attack is allowed.
-        if (school_snap_ && ai_->engage_shielded(target, now_ms) && ai_->last_engage_shield_ms() >= 5u * 60u * 1000u)
+        if (school_snap_ && ai_->gave_up_on(target, now_ms))   // per target: the last 8 give-ups, not only the latest
         {
             // A mob that attacks the bot is always fought back.
             bool attacks_me = false;

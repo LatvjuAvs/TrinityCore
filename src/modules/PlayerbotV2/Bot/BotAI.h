@@ -1285,7 +1285,24 @@ public:
     // an engage→OutOfRange-spam→disengage→re-engage loop for hours).
     uint32     last_engage_shield_ms() const { return last_engage_shield_ms_; }
     void       note_engage(ObjectGuid g, uint32 ms, uint32 shield_ms = 8000)
-    { last_engage_target_ = g; last_engage_at_ms_ = ms; last_engage_shield_ms_ = shield_ms; }
+    {
+        last_engage_target_ = g; last_engage_at_ms_ = ms; last_engage_shield_ms_ = shield_ms;
+        // Local (M7): a give-up (minutes) is also kept in a short list, so giving up on a second mob does not free the first
+        // (Valate, Camp Narache, 2026-10-22: two Plainstriders taken in turn, a give-up every 30 s for half an hour).
+        if (!g.IsEmpty() && shield_ms >= kGiveUpShieldMs)
+            give_ups_[give_up_next_++ % give_ups_.size()] = { g, ms, shield_ms };
+    }
+    static constexpr uint32 kGiveUpShieldMs = 5u * 60u * 1000u;
+    // Local (M7): true while `g` is one of the last mobs the bot gave up on (a shield of kGiveUpShieldMs or more) and that
+    // shield has not lapsed.
+    bool       gave_up_on(ObjectGuid g, uint32 now_ms) const
+    {
+        if (g.IsEmpty()) return false;
+        for (GiveUp const& e : give_ups_)
+            if (e.target == g && now_ms - e.at_ms < e.shield_ms)
+                return true;
+        return false;
+    }
     // True while `g` is the most recently noted engage target AND its shield
     // window has not yet lapsed. Final-review fix (2026-07-03): the dungeon
     // pull-gate pick loops (idle:dungeon_focus_assist / idle:dungeon_dps_assist)
@@ -1295,8 +1312,8 @@ public:
     // window. Callers MUST check this BEFORE probing/selecting a candidate.
     bool       engage_shielded(ObjectGuid g, uint32 now_ms) const
     {
-        return !g.IsEmpty() && g == last_engage_target_ &&
-               now_ms - last_engage_at_ms_ < last_engage_shield_ms_;
+        return !g.IsEmpty() && ((g == last_engage_target_ &&
+               now_ms - last_engage_at_ms_ < last_engage_shield_ms_) || gave_up_on(g, now_ms));
     }
 
     // ---- dungeon route-waypoint follow cursor ----
@@ -3819,6 +3836,9 @@ private:
     ObjectGuid     last_engage_target_;
     uint32         last_engage_at_ms_ = 0;
     uint32         last_engage_shield_ms_ = 8000;
+    struct GiveUp { ObjectGuid target; uint32 at_ms = 0; uint32 shield_ms = 0; };
+    std::array<GiveUp, 8> give_ups_{};   // local (M7): the last mobs given up on, see note_engage
+    uint8          give_up_next_ = 0;
     // Committed route-waypoint cursor + the map it belongs to (self-invalidates
     // on map change). See dungeon_route_wp() for the anti-oscillation rationale.
     int32_t        dungeon_route_wp_ = -1;
