@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include "Player.h"   // EQUIPMENT_SLOT_RANGED (local, M7)
 
 namespace Playerbot {
 
@@ -379,11 +380,14 @@ bool OpenerFire(BotSnapshotView const& s, BotAI& ai,
         return true;
     }
 
-    // Local (M7): the hunter's dead zone. Between melee (5.5 y) and the shots' 8 y minimum nothing in the rotation can fire, no
+    // Local (M7): the hunter's shot range. Between melee (5.5 y) and the shots' 8 y minimum nothing in the rotation can fire, no
     // cast fails, so the approach below never steps and the opener gives up after 25 s (Valate, Camp Narache, 2026-10-22: 30
     // give-ups in an hour at 6 y from Plainstriders; hunters gave up 12 times per bot, other classes 1-2). A hunter with
     // ammo steps back to shot range, as a player does; a mob that is already on the hunter is fought in melee instead.
-    if (s.cls() == CLASS_HUNTER && s.ammo_kind() != 0 && s.ammo_count() > 0 && vu->victim != s.guid())
+    // (A broken bow cannot shoot: that hunter melees, the core's chase brings it in.)
+    if (s.cls() == CLASS_HUNTER && s.ammo_kind() != 0 && s.ammo_count() > 0 && vu->victim != s.guid() &&
+        s.raw().inventory.equipped[EQUIPMENT_SLOT_RANGED].entry != 0 &&
+        s.raw().inventory.equipped[EQUIPMENT_SLOT_RANGED].durability_pct > 0)
     {
         float bx, by, bz;
         s.position(bx, by, bz);
@@ -394,6 +398,16 @@ bool OpenerFire(BotSnapshotView const& s, BotAI& ai,
             constexpr float kShotStand = 11.0f;
             emit.move_to(vu->x + dx / d * kShotStand, vu->y + dy / d * kShotStand, bz, /*run*/ true);
             ai.set_last_rule_fired("combat:opener_dead_zone");
+            return true;
+        }
+        // Too far for a shot: a ranged hunter's start_attack does not chase (no melee swing), and an armed Auto Shot waits
+        // silently for the target to come within 35 y, so no cast ever fails and the approach below never steps (Kinaya,
+        // Mulgore, 2026-10-22: attacks opened from 56 y, a give-up every 30 s). Walk into shot range, as a player does.
+        if (d > 30.0f)
+        {
+            constexpr float kShotApproach = 25.0f;
+            emit.move_to(vu->x + dx / d * kShotApproach, vu->y + dy / d * kShotApproach, vu->z, /*run*/ true);
+            ai.set_last_rule_fired("combat:opener_shot_range");
             return true;
         }
     }

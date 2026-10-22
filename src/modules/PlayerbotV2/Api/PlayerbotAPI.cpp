@@ -3049,7 +3049,15 @@ Result API::start_attack(ObjectGuid target, uint8 avoid_school_mask)
         if (p_->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL)) return;
         if (!p_->HasSpell(AUTO_SHOT)) return;
         if (!p_->GetWeaponForAttack(RANGED_ATTACK, true)) return;
-        p_->CastSpell(victim, AUTO_SHOT, false);
+        SpellCastResult const res = p_->CastSpell(victim, AUTO_SHOT, false);
+        // Local (M7): hunters gave up 71% of all openers (2026-10-22) with an intact gun and ammo; say why Auto Shot fails.
+        if (res != SPELL_CAST_OK)
+        {
+            static std::atomic<uint32> s_logged{ 0 };
+            if (s_logged.fetch_add(1, std::memory_order_relaxed) % 20u == 0u)
+                TC_LOG_INFO("playerbot.v2", "[auto_shot_fail] {} L{} result={} dist={:.1f} ammo_id={}", p_->GetName(), uint32(p_->GetLevel()),
+                    uint32(res), p_->GetExactDist(victim), p_->GetAmmoId());
+        }
     };
 
     // Idempotency fast-path: if we are already attacking this exact target,
