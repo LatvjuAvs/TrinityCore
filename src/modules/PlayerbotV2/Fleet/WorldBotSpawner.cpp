@@ -1988,6 +1988,10 @@ void WorldBotSpawner::OnWorldTick(uint32 now_ms)
             pool_counts_inflight_ = false;
             uint32 a = 0, h = 0;
             for (std::size_t b = 0; b < kPoolBrackets; ++b) { a += counts.alliance[b]; h += counts.horde[b]; }
+            // Local (M7): the roster total follows the census. It was read once at start, so after a `wipefleet` at runtime the
+            // seeder still saw 824 of PoolMax 800 and created nothing (live 2026-10-22 05:50: 0 bots for 15 minutes).
+            if (pool_count_ >= 0 && int64(a + h) < pool_count_)
+                pool_count_ = int64(a + h);
             TC_LOG_INFO("playerbot.v2", "[world] roster census: Alliance {} Horde {} (target Horde {}%, cap {} per bracket); per bracket 1-9/10s/20s/30s/40s/50-60 A/H: {}/{} {}/{} {}/{} {}/{} {}/{} {}/{}",
                 a, h, cfg_.pool_horde_pct, PoolBracketCap(cfg_.pool_max), counts.alliance[0], counts.horde[0], counts.alliance[1], counts.horde[1],
                 counts.alliance[2], counts.horde[2], counts.alliance[3], counts.horde[3], counts.alliance[4], counts.horde[4], counts.alliance[5], counts.horde[5]);
