@@ -7,6 +7,7 @@
 #include "Fleet/WorldLeash.h"
 #include "Fleet/CityLayer.h"
 #include "WorldBotSpawner.h"
+#include "QuestParty.h"
 #include "Bot/TownLife.h"
 #include "WakeSelect.h"
 #include "StrandedWatch.h"
@@ -949,7 +950,11 @@ void WorldBotSpawner::DriveDespawn(uint32 now_ms, std::vector<Anchor> const& anc
         ++all_bots;
         if (!owner_.IsAmbientBot(id, p)) { ++owned_bots; return; }
         // Bots queued for / inside a battleground, in a group or in an instance are not part of the open-world population.
-        if (p->InBattleground() || p->InBattlegroundQueue() || p->GetGroup()
+        // Local (M7): a quest party (Fleet/QuestParty.h) is open-world population and counts toward the cap (it is still never
+        // logged out, see below); otherwise every party member got a replacement and 601 bots were online for a cap of 220
+        // (2026-10-22, half the world grouped).
+        bool const quest_party = p->GetGroup() && ::Playerbot::V2::QuestParty::IsMember(uint64(id));
+        if (p->InBattleground() || p->InBattlegroundQueue() || (p->GetGroup() && !quest_party)
             || (p->GetMap() && (p->GetMap()->IsDungeon() || p->GetMap()->IsBattlegroundOrArena())))
         {
             ++tied_bots;
@@ -1012,6 +1017,11 @@ void WorldBotSpawner::DriveDespawn(uint32 now_ms, std::vector<Anchor> const& anc
     bool const at_cap = used >= cfg_.max_bots && deficit > 0;
     if (at_cap)
         limit = std::min(std::max(limit, 1u), deficit);
+    // Local (M7): AlwaysOn with nobody online keeps every bot, so a world over its cap (quest party members counted since
+    // 2026-10-22, 430 online for 220) never shrank. Solo bots log off a few per pass, like players, until it is back at the cap.
+    bool const drain = cfg_.always_on && anchors.empty() && used > cfg_.max_bots;
+    if (drain)
+        limit = std::min(limit, used - cfg_.max_bots);
 
     // Over the global cap with every bot still near someone: nothing to do here, DriveSpawn simply stops adding.
     std::sort(victims.begin(), victims.end(), [](Victim const& a, Victim const& b) { return a.score > b.score; });
@@ -1019,7 +1029,7 @@ void WorldBotSpawner::DriveDespawn(uint32 now_ms, std::vector<Anchor> const& anc
     for (Victim const& v : victims)
     {
         if (n >= limit) break;
-        if (!v.orphan && !at_cap) continue;
+        if (!v.orphan && !at_cap && !drain) continue;
         Player* vp = ObjectAccessor::FindConnectedPlayer(v.guid);
         if (!vp) continue;
         bool const was_awake = vp->IsInWorld();
