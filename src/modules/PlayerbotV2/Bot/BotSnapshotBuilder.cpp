@@ -57,6 +57,7 @@
 #include "Battleground.h"
 #include "CharacterCache.h"   // sCharacterCache for owner_name lookup
 #include "Fleet/OwnerRegistry.h"   // owner→character resolution for mat-share mail
+#include "Fleet/QuestParty.h"         // local (M7): the party quest biases the picker
 #include "Guild.h"           // Guild::Member, GetMember / GetRankId for Phase B
 #include "GuildMgr.h"        // sGuildMgr lookup of bot's guild for snapshot fields
 #include "GameObject.h"
@@ -5440,6 +5441,10 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
         // compare it against a near actionable objective (best_same_map_dist): a
         // turn-in 1100y away must NOT outrank a use-item/objective at the bot's feet.
         float  best_breadcrumb_sm_dist = std::numeric_limits<float>::max();
+        // Local (M7): a quest party (Fleet/QuestParty.h) works on one quest together. Its objective counts as 300 y nearer,
+        // so the members pick the same camp instead of each the nearest of their own and drifting apart.
+        uint32 const party_quest = ::Playerbot::V2::QuestParty::PartyQuest(p->GetGUID().GetCounter());
+        auto const ranked = [party_quest](uint32 quest, float e) { return quest == party_quest ? std::max(0.f, e - 300.0f) : e; };
         for (auto const& q : snap->quest_log.quests)
         {
             // PROFESSION-SKILL GATE. A quest gated on a profession skill the
@@ -5552,7 +5557,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                         oc.kind == ObjectiveClusterKind::AreaTrigger && oc.map_id == bot_map)
                     {
                         float const edge = std::hypot(oc.x - p->GetPositionX(), oc.y - p->GetPositionY());
-                        if (edge <= 1500.0f && edge < best_same_map_dist)
+                        if (edge <= 1500.0f && ranked(q.quest_id, edge) < best_same_map_dist)
                         {
                             QuestObjectiveEntry synth{};
                             synth.id        = 0;
@@ -5564,7 +5569,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                             best_same_map       = synth;
                             best_same_map_quest = q.quest_id;
                             best_same_map_set   = true;
-                            best_same_map_dist  = edge;
+                            best_same_map_dist  = ranked(q.quest_id, edge);
                         }
                         continue;   // never a turn-in while incomplete
                     }
@@ -5617,7 +5622,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                         const float ddy = poiy - p->GetPositionY();
                         const float edge = std::sqrt(ddx * ddx + ddy * ddy);
                         constexpr float kFarObjective = 1500.0f;
-                        if (edge <= kFarObjective && edge < best_same_map_dist)
+                        if (edge <= kFarObjective && ranked(q.quest_id, edge) < best_same_map_dist)
                         {
                             QuestObjectiveEntry synth{};
                             synth.id             = 0;
@@ -5630,7 +5635,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                             best_same_map        = synth;
                             best_same_map_quest  = q.quest_id;
                             best_same_map_set    = true;
-                            best_same_map_dist   = edge;
+                            best_same_map_dist   = ranked(q.quest_id, edge);
                         }
                         // Never breadcrumb a use-item quest: turning it in is
                         // impossible while incomplete. If far/not-nearest it simply
@@ -5843,12 +5848,12 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                                     std::sqrt(ddx * ddx + ddy * ddy) - orad);
                             }
                             constexpr float kFarObjective = 1500.0f;  // ~one zone
-                            if (edge <= kFarObjective && edge < best_same_map_dist)
+                            if (edge <= kFarObjective && ranked(q.quest_id, edge) < best_same_map_dist)
                             {
                                 best_same_map = o;
                                 best_same_map_quest = q.quest_id;
                                 best_same_map_set = true;
-                                best_same_map_dist = edge;
+                                best_same_map_dist = ranked(q.quest_id, edge);
                             }
                             // No early-exit: keep scanning ALL objectives/quests so a
                             // closer one later in the list can still win. A far

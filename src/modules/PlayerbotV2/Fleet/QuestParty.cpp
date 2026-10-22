@@ -28,7 +28,8 @@ namespace Playerbot::V2::QuestParty {
 namespace {
 
 constexpr uint32 kTickMs          = 20u * 1000u;
-constexpr float  kFormRange       = 40.0f;          // members meet where they stand
+constexpr float  kFormRange       = 100.0f;         // in the same zone; a mate out of /say range gets a whisper and walks over
+constexpr float  kSayRange        = 25.0f;
 constexpr uint8  kLevelSpread     = 2;              // at forming
 constexpr uint8  kLevelSpreadMax  = 3;              // a party whose levels drift further apart breaks up
 constexpr float  kApartRange      = 150.0f;
@@ -41,12 +42,13 @@ struct Party
     ObjectGuid group;
     uint32 ends_ms = 0;
     uint32 apart_since_ms = 0;
+    uint32 quest = 0;                                // the quest the party works on together (0: none shared)
 };
 
 std::vector<Party> g_parties;                        // world thread
 std::unordered_map<uint64, uint32> g_cooldown;       // world thread: bot -> no new party before
 std::mutex g_members_mtx;
-std::unordered_set<uint64> g_members;                // read by the bot workers
+std::unordered_map<uint64, uint32> g_members;        // read by the bot workers: member -> party quest
 
 uint32 Share()   { return uint32(std::clamp(sConfigMgr->GetIntDefault("Playerbot.World.QuestPartyShare", 35, true), 0, 100)); }
 uint32 MaxSize() { return uint32(std::clamp(sConfigMgr->GetIntDefault("Playerbot.World.QuestPartyMaxSize", 3, true), 2, 5)); }
@@ -96,11 +98,11 @@ std::vector<Player*> Members(Group* g)
 
 void Publish()
 {
-    std::unordered_set<uint64> now;
+    std::unordered_map<uint64, uint32> now;
     for (Party const& party : g_parties)
         if (Group* g = sGroupMgr->GetGroupByGUID(party.group))
             for (Group::MemberSlot const& slot : g->GetMemberSlots())
-                now.insert(slot.guid.GetCounter());
+                now[slot.guid.GetCounter()] = party.quest;
     std::lock_guard lk(g_members_mtx);
     g_members.swap(now);
 }
@@ -133,8 +135,44 @@ void Adopt(Player* p, uint32 now)
     if (std::any_of(g_parties.begin(), g_parties.end(), [g](Party const& x) { return x.group == g->GetGUID(); })) return;
     for (Group::MemberSlot const& slot : g->GetMemberSlots())
         if (!IsWorldBot(slot.guid.GetCounter())) return;
-    g_parties.push_back({ g->GetGUID(), now + kMoodWindowMs, 0 });
+    g_parties.push_back({ g->GetGUID(), now + kMoodWindowMs, 0, 0 });
     TC_LOG_INFO("playerbot.v2", "[quest_party] adopted a saved party of {} led by {}", g->GetMembersCount(), p->GetName());
+}
+
+// The quest the party works on: the leader's open quest that most members also have (2 or more), the current one while it
+// still qualifies. The members' quest pickers prefer it (BotSnapshotBuilder), so they pick the same camp.
+void RefreshQuest(Party& party, Group* g, std::vector<Player*> const& ms)
+{
+    Player* lead = ObjectAccessor::FindConnectedPlayer(g->GetLeaderGUID());
+    if (!lead)
+        return;
+    std::vector<std::vector<uint32>> open;
+    for (Player* p : ms)
+        open.push_back(OpenQuests(p));
+    auto holders = [&](uint32 q) {
+        return uint32(std::count_if(open.begin(), open.end(), [q](std::vector<uint32> const& v) { return std::find(v.begin(), v.end(), q) != v.end(); }));
+    };
+    std::vector<uint32> const mine = OpenQuests(lead);
+    uint32 best = 0, best_n = 1;
+    if (party.quest && std::find(mine.begin(), mine.end(), party.quest) != mine.end() && holders(party.quest) >= 2)
+        return;
+    for (uint32 q : mine)
+        if (uint32 const n = holders(q); n > best_n)
+        {
+            best = q;
+            best_n = n;
+        }
+    if (best == party.quest)
+        return;
+    party.quest = best;
+    if (!best)
+        return;
+    Quest const* qt = sObjectMgr->GetQuestTemplate(best);
+    std::string const title = qt ? std::string(qt->GetLogTitle()) : "the next one";
+    if (lead->IsAlive() && !lead->IsInCombat())
+        lead->Say("Next up: " + title + ".", Tongue(lead));
+    TC_LOG_INFO("playerbot.v2", "[quest_party] {}'s party works on quest {} \"{}\" ({} of {} have it)", lead->GetName(), best, title, best_n,
+        uint32(ms.size()));
 }
 
 void Maintain(uint32 now)
@@ -188,6 +226,8 @@ void Maintain(uint32 now)
             else
                 it->apart_since_ms = 0;
         }
+        if (!why)
+            RefreshQuest(*it, g, ms);
         if (why)
         {
             Disband(g, now, why);
@@ -241,7 +281,7 @@ void Form(uint32 now)
             if (j == i || b.used) continue;
             if (b.p->GetTeam() != a.p->GetTeam() || b.p->GetMapId() != a.p->GetMapId()) continue;
             if (std::abs(int32(b.p->GetLevel()) - int32(a.p->GetLevel())) > kLevelSpread) continue;
-            if (b.p->GetExactDist2d(a.p) > kFormRange) continue;
+            if (b.p->GetZoneId() != a.p->GetZoneId() || b.p->GetExactDist2d(a.p) > kFormRange) continue;
             uint32 const q = SharedQuest(a.quests, b.quests);
             if (!q || (quest && q != quest)) continue;
             quest = q;
@@ -272,14 +312,29 @@ void Form(uint32 now)
         a.used = true;
         g->BroadcastGroupUpdate();
         uint32 const minutes = 30u + Mix(a.p->GetGUID().GetCounter(), now / 1000u) % 31u;
-        g_parties.push_back({ g->GetGUID(), now + minutes * 60u * 1000u, 0 });
+        g_parties.push_back({ g->GetGUID(), now + minutes * 60u * 1000u, 0, quest });
 
         Quest const* qt = sObjectMgr->GetQuestTemplate(quest);
         std::string const title = qt ? std::string(qt->GetLogTitle()) : "this";
-        a.p->Say("Doing " + title + " too? Let's group up.", Tongue(a.p));
-        mates.front()->p->Say(std::string_view("Sure, let's go."), Tongue(mates.front()->p));
-        TC_LOG_INFO("playerbot.v2", "[quest_party] formed: {} (L{}, map {} zone {}) for quest {} \"{}\", {} min", names,
-            uint32(a.p->GetLevel()), a.p->GetMapId(), a.p->GetZoneId(), quest, title, minutes);
+        // A mate in /say range answers aloud; one further off was asked by whisper and walks over (idle:party_regroup).
+        float far_d = 0.0f;
+        for (Candidate* m : mates)
+        {
+            float const d = m->p->GetExactDist2d(a.p);
+            far_d = std::max(far_d, d);
+            if (d > kSayRange)
+            {
+                a.p->Whisper("Doing " + title + " too? Want to group up?", Tongue(a.p), m->p);
+                m->p->Whisper(std::string_view("Sure, on my way."), Tongue(m->p), a.p);
+            }
+        }
+        if (mates.front()->p->GetExactDist2d(a.p) <= kSayRange)
+        {
+            a.p->Say("Doing " + title + " too? Let's group up.", Tongue(a.p));
+            mates.front()->p->Say(std::string_view("Sure, let's go."), Tongue(mates.front()->p));
+        }
+        TC_LOG_INFO("playerbot.v2", "[quest_party] formed: {} (L{}, map {} zone {}) for quest {} \"{}\", {} min, {:.0f} y apart", names,
+            uint32(a.p->GetLevel()), a.p->GetMapId(), a.p->GetZoneId(), quest, title, minutes, far_d);
     }
 }
 
@@ -357,6 +412,13 @@ bool IsMember(uint64 bot_low)
 {
     std::lock_guard lk(g_members_mtx);
     return g_members.contains(bot_low);
+}
+
+uint32 PartyQuest(uint64 bot_low)
+{
+    std::lock_guard lk(g_members_mtx);
+    auto const it = g_members.find(bot_low);
+    return it == g_members.end() ? 0u : it->second;
 }
 
 } // namespace Playerbot::V2::QuestParty
