@@ -2,6 +2,7 @@
 // rotation registry and runs it. If no rotation is registered, the bot just
 // engages auto-attack on its current target — never freezes.
 
+#include "Util/TaxiFare.h"
 #include "StateBase.h"
 #include "Bot/BotAI.h"
 #include "Bot/Formation.h"                      // StableJitter / MeleeArcSpot (SpreadOut)
@@ -1849,6 +1850,7 @@ void DispatchInCombat(BotAI& ai,
         // gear is destroyed, fleeing to repair is ALWAYS correct — fire unconditionally.
         if (!snapshot.is_in_instance() && !snapshot.in_battleground() &&
             !group.exists() &&
+            !::Playerbot::V2::TaxiFare::TooPoorToRepair(snapshot.raw().inventory.gold, snapshot.estimated_repair_cost()) &&   // local (M7)
             dura <= 20 &&
             (dura <= 5 || snapshot.combat_duration_ms() > 60000 || low_hp))
         {

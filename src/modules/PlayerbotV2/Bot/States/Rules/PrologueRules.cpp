@@ -379,6 +379,25 @@ bool OpenerFire(BotSnapshotView const& s, BotAI& ai,
         return true;
     }
 
+    // Local (M7): the hunter's dead zone. Between melee (5.5 y) and the shots' 8 y minimum nothing in the rotation can fire, no
+    // cast fails, so the approach below never steps and the opener gives up after 25 s (Valate, Camp Narache, 2026-10-22: 30
+    // give-ups in an hour at 6 y from Plainstriders; hunters gave up 12 times per bot, other classes 1-2). A hunter with
+    // ammo steps back to shot range, as a player does; a mob that is already on the hunter is fought in melee instead.
+    if (s.cls() == CLASS_HUNTER && s.ammo_kind() != 0 && s.ammo_count() > 0 && vu->victim != s.guid())
+    {
+        float bx, by, bz;
+        s.position(bx, by, bz);
+        float const dx = bx - vu->x, dy = by - vu->y;
+        float const d = std::sqrt(dx * dx + dy * dy);
+        if (d > 5.5f && d < 8.0f)
+        {
+            constexpr float kShotStand = 11.0f;
+            emit.move_to(vu->x + dx / d * kShotStand, vu->y + dy / d * kShotStand, bz, /*run*/ true);
+            ai.set_last_rule_fired("combat:opener_dead_zone");
+            return true;
+        }
+    }
+
     // Server-verdict approach: the executor counts CastSpell results of
     // OutOfRange/LoS against our selection. Any since the last reset
     // means "can't reach from here" — step toward the victim (mirrors

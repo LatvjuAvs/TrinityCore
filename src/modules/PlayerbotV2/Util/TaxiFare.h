@@ -34,4 +34,13 @@ inline uint64 RouteFare(Player const* p, std::vector<uint32> const& nodes)
     return p ? p->ApplyClassicLegacyPriceMod(total, 4) : total;
 }
 
+// Too poor to repair even a quarter of its gear: a player in that state keeps playing on broken gear and repairs once he has
+// earned the money. The critical repair walk and the flee to repair stand down for it (2026-10-22: Gemis, level 2 priest,
+// 10 copper, all gear at 0%, stood at idle:critical_repair_approach and gave up on every mob; 1,370 critical repair
+// lines and 488 flees to repair in 49 minutes after the free repair was switched off).
+inline bool TooPoorToRepair(int64 money, uint32 repair_cost)
+{
+    return PayOwnWay() && repair_cost > 0 && money * 4 < int64(repair_cost);
+}
+
 } // namespace Playerbot::V2::TaxiFare

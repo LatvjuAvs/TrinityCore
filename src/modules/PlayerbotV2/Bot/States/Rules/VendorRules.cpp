@@ -16,6 +16,7 @@
 // Behavior identical to the legacy inline block at State_Idle.cpp ≈4690.
 // See ITEM_VENDOR_SYSTEM_PLAN.md §"Level 0" / Phase 2 for the rationale.
 
+#include "Util/TaxiFare.h"
 #include "Bot/IdleRule.h"
 #include "Group/GroupSnapshot.h"
 #include "Bot/BotAI.h"
@@ -537,6 +538,8 @@ bool CriticalRepairGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView c
     }
     // A battleground match owns the bot (BgDispatch, priority 718): a repair walk would pull it off the march every tick.
     if (s.in_battleground()) return false;
+    // Local (M7): in a fresh world a bot too poor to repair keeps questing on broken gear (Util/TaxiFare.h).
+    if (::Playerbot::V2::TaxiFare::TooPoorToRepair(s.raw().inventory.gold, s.estimated_repair_cost())) return false;
     // Futility backoff: the bot was at a vendor making no durability progress
     // (too poor to repair the rest even after selling trash) and yielded so the
     // quest funnel could run and earn money. Stay suppressed until the cooldown
