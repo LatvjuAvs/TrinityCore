@@ -2,6 +2,7 @@
 // whenever the bot is grouped. Today: keep within follow distance of the
 // leader when idle. Future: ready-checks, raid mark targeting, role hand-off.
 
+#include "Fleet/QuestParty.h"
 #include "StateBase.h"
 #include "MaintainHelpers.h"
 #include "Bot/BotAI.h"
@@ -1253,8 +1254,14 @@ void DispatchInGroup(BotAI& ai,
         dist < kDetourMaxRange;
     // The one answer to "does another layer own this bot's movement right now": the follow, the slot move and the recall all stand
     // down for it (a rooted bot cannot follow either).
+    // Local (M7): a quest party (Fleet/QuestParty.h) is not a follow group: its members quest on their own and keep together
+    // with idle:party_regroup (70 y). The companion follow leashed them to the leader and pulled a hunter back between every
+    // shot (Enid, 2026-10-22: auto_attack and ingroup:follow_recall in turn, a boar 10 y away never hit; hunters made 71% of
+    // all opener give-ups once 60% of free bots were in parties).
+    bool const quest_party = ::Playerbot::V2::QuestParty::IsMember(snapshot.bot_id());
     bool const movement_owned_elsewhere =
-        in_active_bg || dungeon_run_owns_movement || detour_leased || holding_position || order_owns_movement || snapshot.is_rooted();
+        in_active_bg || dungeon_run_owns_movement || detour_leased || holding_position || order_owns_movement || snapshot.is_rooted() ||
+        quest_party;
     bool const refollow = ai.take_formation_refollow();
     // Owner formation: the bot's goal is its SLOT, recomputed every tick from the owner's live position and facing,
     // not "within the recall slack of the owner" (a slot ring wider than the slack, or any spot inside the ring,
