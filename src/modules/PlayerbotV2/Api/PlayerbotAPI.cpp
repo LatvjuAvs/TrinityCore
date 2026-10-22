@@ -2674,6 +2674,9 @@ bool API::TrySwimCrossing(float x, float y, float z, bool run)
     Map* mm = p_->GetMap();
     if (!mm || mm->IsDungeon() || mm->IsBattlegroundOrArena() || p_->IsInFlight() || p_->GetVehicle())
         return false;
+    // Not in a capital: town movement keeps out of the canals on purpose (live 2026-10-22: bots swam the Stormwind canals).
+    if (::Playerbot::V2::World::IsVanillaCapitalZone(p_->GetZoneId()))
+        return false;
     float const bx = p_->GetPositionX(), by = p_->GetPositionY(), bz = p_->GetPositionZ();
     float const dx = x - bx, dy = y - by, d = std::hypot(dx, dy);
     if (d < 5.0f)
