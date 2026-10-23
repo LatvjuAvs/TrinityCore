@@ -83,8 +83,24 @@
 
 #include "Bot/States/MaintainHelpers.h"
 #include "Fleet/QuestParty.h"   // local (M7)
+#include "ConditionMgr.h"       // local (M7): ItemUsableOn
 
 namespace Playerbot::States {
+
+// Local (M7, 2026-10-23): false when the world database's conditions for the item's on-use spell refuse `target` (Lazy Peons:
+// the Blackjack needs a sleeping peon; bots kept hitting the one they had just woken, every cast refused without a word).
+static bool ItemUsableOn(BotSnapshotView const& s, uint32 item_entry, ObjectGuid target)
+{
+    ItemTemplate const* it = sObjectMgr->GetItemTemplate(item_entry);
+    Player* self = ObjectAccessor::FindConnectedPlayer(s.raw().guid);
+    Unit* tu = self ? ObjectAccessor::GetUnit(*self, target) : nullptr;
+    if (!it || !tu)
+        return true;
+    for (ItemEffectEntry const* eff : it->Effects)
+        if (eff->TriggerType == ITEM_SPELLTRIGGER_ON_USE && eff->SpellID > 0)
+            return sConditionMgr->IsObjectMeetingNotGroupedConditions(CONDITION_SOURCE_TYPE_SPELL, uint32(eff->SpellID), self, tu);
+    return true;
+}
 
 // The Maintain* family below are declared in MaintainHelpers.h so per-
 // subsystem rule files (Bot/States/Rules/MaintainRules.cpp etc.) can
@@ -16635,6 +16651,7 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
                     const float dx = u.x - bx, dy = u.y - by, dz = u.z - bz;
                     const float dsq = dx*dx + dy*dy + dz*dz;
                     if (dsq > kInteractSq) return;
+                    if (!ItemUsableOn(s, tool.item_entry, u.guid)) return;
                     if (dsq < bestDist) { bestDist = dsq; best_target = u.guid; }
                 };
                 for (auto const& u : s.raw().combat.nearby_friends) consider(u);
@@ -16687,7 +16704,9 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
                         if (u.hp <= 0) continue;
                         const float dx = u.x - bx, dy = u.y - by, dz = u.z - bz;
                         const float dsq = dx*dx + dy*dy + dz*dz;
-                        if (dsq < bestSq) { bestSq = dsq; friendly = &u; }
+                        if (dsq >= bestSq) continue;
+                        if (!ItemUsableOn(s, source_item, u.guid)) continue;   // local (M7): awake peon, try the next one
+                        bestSq = dsq; friendly = &u;
                     }
                     if (friendly)
                     {
