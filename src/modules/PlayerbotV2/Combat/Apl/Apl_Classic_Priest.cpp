@@ -431,7 +431,11 @@ bool SoloPriest(ApPredicateContext const& ctx) { return !ctx.group.exists(); }
 
 bool HealerMayWand(ApPredicateContext const& ctx)
 {
-    return HasLiveTarget(ctx) && (ctx.bot.in_combat() || SoloPriest(ctx)) && WoundedCount(ctx, 90) == 0 && LowestFriendOrSelf(ctx).hp_pct > 90;
+    // Alone, only its own health counts (above half): the patient pick also takes wounded strangers, and in a crowded starter
+    // valley someone always is, so a solo priest healed passers-by and never opened (Nikalen, level 2: 2 Smites in 13 minutes).
+    if (SoloPriest(ctx))
+        return HasLiveTarget(ctx) && ctx.bot.hp_pct() > 50;
+    return HasLiveTarget(ctx) && ctx.bot.in_combat() && WoundedCount(ctx, 90) == 0 && LowestFriendOrSelf(ctx).hp_pct > 90;
 }
 bool HealerMayDps(ApPredicateContext const& ctx)
 {
