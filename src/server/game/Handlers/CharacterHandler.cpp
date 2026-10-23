@@ -1600,7 +1600,7 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder const& holder)
     }
 
     // Load pet if any (if player not alive and in taxi flight or another then pet will remember as temporary unsummoned)
-    pCurrChar->ResummonPetTemporaryUnSummonedIfAny();
+    pCurrChar->DelayPetResummon(4000);
 
     // Set FFA PvP for non GM in non-rest mode
     if (sWorld->IsFFAPvPRealm() && !pCurrChar->IsGameMaster() && !pCurrChar->HasPlayerFlag(PLAYER_FLAGS_RESTING))
@@ -1738,9 +1738,8 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder const& holder)
 
     // Battle.net account with an authenticator (support site account page): "account secured", +4 backpack slots and no
     // "attach an Authenticator" prompts. Removing it takes the slots away again (items in them are mailed).
-    // Forever.AccountSecuredForAll = 1 (local servers): every account counts as secured, with no authenticator code at login.
     {
-        bool secured = sConfigMgr->GetBoolDefault("Forever.AccountSecuredForAll", false);
+        bool secured = sWorld->getBoolConfig(CONFIG_CLASSIC_SECURED_BAG_SLOTS_FOR_ALL);
         if (!secured)
         {
             if (QueryResult result = LoginDatabase.PQuery("SELECT COUNT(*) FROM battlenet_accounts WHERE id = {} AND authenticator_secret IS NOT NULL "
