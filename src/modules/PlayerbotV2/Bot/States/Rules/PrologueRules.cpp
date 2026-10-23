@@ -374,9 +374,18 @@ bool OpenerFire(BotSnapshotView const& s, BotAI& ai,
         emit.stop_attack();
         ai.note_engage(vg, now_ms, 5u * 60u * 1000u);
         ai.set_last_rule_fired("combat:opener_give_up");
+        // Local (M7): what the bot saw at the give-up (hunters gave up ~10 times each per half hour in a fresh world, other
+        // classes almost never; 2026-10-23).
+        float gbx, gby, gbz;
+        s.position(gbx, gby, gbz);
         TC_LOG_INFO("playerbot.v2",
-            "[opener_give_up] bot={} victim={} unreachable for {}ms — shielded 5min",
-            s.bot_id(), vg.ToString(), now_ms - ai.opener_victim_since_ms());
+            "[opener_give_up] bot={} victim={} unreachable for {}ms — shielded 5min | {} L{} class={} dist={:.1f} dz={:.1f} los={} "
+            "moving={} casting={} ammo={}x{} ranged_dura={} victim_hp={}% victim_in_combat={} last_rule={}",
+            s.bot_id(), vg.ToString(), now_ms - ai.opener_victim_since_ms(), s.name(), uint32(s.level()), uint32(s.cls()),
+            std::hypot(vu->x - gbx, vu->y - gby), vu->z - gbz, vu->in_los ? 1 : 0, s.raw().movement.is_moving ? 1 : 0,
+            s.is_casting() ? 1 : 0, uint32(s.ammo_kind()), s.ammo_count(),
+            uint32(s.raw().inventory.equipped[EQUIPMENT_SLOT_RANGED].durability_pct), uint32(vu->hp_pct()),
+            vu->unit_in_combat ? 1 : 0, ai.last_rule_fired() ? ai.last_rule_fired() : "-");
         return true;
     }
 
