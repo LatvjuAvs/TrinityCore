@@ -78,6 +78,20 @@ bool StarterQuestTooEarly(Player const* bot, Quest const* quest)
     return std::none_of(it->second.begin(), it->second.end(), [home](Spot const& sp) { return Inside(*home, sp.map, sp.x, sp.y); });
 }
 
+bool KeepInStarterArea(uint32 map, float x, float y, uint8 level)
+{
+    static bool const fresh = sConfigMgr->GetBoolDefault("Playerbot.World.FreshStart", false, true);
+    static uint32 const leave_level = uint32(std::max(0, sConfigMgr->GetIntDefault("Playerbot.World.StarterLeaveLevel", 4, true)));
+    if (!fresh || level >= leave_level)
+        return false;
+    return std::any_of(kStarts.begin(), kStarts.end(), [&](StartPoint const& sp) { return Inside(sp, map, x, y); });
+}
+
+bool SameStarterArea(uint32 map, float x, float y, float tx, float ty)
+{
+    return std::any_of(kStarts.begin(), kStarts.end(), [&](StartPoint const& sp) { return Inside(sp, map, x, y) && Inside(sp, map, tx, ty); });
+}
+
 bool QuestTooHardForBot(Player const* bot, Quest const* quest)
 {
     static int32 const margin = sConfigMgr->GetIntDefault("Playerbot.Bot.SoloQuestLevelMargin", 2, true);

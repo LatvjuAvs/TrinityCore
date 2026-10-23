@@ -17748,6 +17748,11 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
             {
                 if (!h) continue;
                 if (ai.hub_recently_tried(h->hubId, hub_now_ms)) continue;
+                // Local (M7): a newcomer stays in its starter area (Bot/World/StarterGate.h).
+                if (::Playerbot::Local::KeepInStarterArea(s.map_id(), s.raw().position.x, s.raw().position.y, s.level()) &&
+                    !::Playerbot::Local::SameStarterArea(s.map_id(), s.raw().position.x, s.raw().position.y,
+                                                         h->location.GetPositionX(), h->location.GetPositionY()))
+                    continue;
                 // T-P0a: emit.move_to is map-implicit — it pathfinds on the
                 // bot's CURRENT map. Feeding it a cross-map hub's coordinates
                 // produces a doomed same-map pathfind toward a point that
@@ -20581,6 +20586,10 @@ void DispatchIdle(BotAI& ai,
                 for (::Playerbot::V2::Travel::QuestHub const* h : ::Playerbot::Services::Hubs().GetQuestHubsForBot(s.raw(), 24))
                 {
                     float const d = h->GetDistanceFrom(s.raw());
+                    // Local (M7): a newcomer's idle walk stays in its starter area (Bot/World/StarterGate.h).
+                    if (::Playerbot::Local::KeepInStarterArea(s.map_id(), px, py, s.level()) &&
+                        !::Playerbot::Local::SameStarterArea(s.map_id(), px, py, h->location.GetPositionX(), h->location.GetPositionY()))
+                        continue;
                     if (d >= V2::kIdleMinHubYards && d <= V2::kIdleMaxHubYards) near.push_back(h);
                 }
                 std::sort(near.begin(), near.end(), [&](::Playerbot::V2::Travel::QuestHub const* a, ::Playerbot::V2::Travel::QuestHub const* b)

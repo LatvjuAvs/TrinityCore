@@ -981,6 +981,8 @@ bool QuestSiteShareGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView c
     auto const& poi = s.current_objective_poi();
     if (!poi.valid || poi.map_id != s.map_id() || ai.current_objective_blacklisted(s.published_at_ms())) return false;
     float bx, by, bz; s.position(bx, by, bz);
+    // Local (M7): a newcomer in its starter valley shares the crowd like players at launch (Bot/World/StarterGate.h).
+    if (::Playerbot::Local::KeepInStarterArea(s.map_id(), bx, by, s.level())) return false;
     return std::hypot(poi.x - bx, poi.y - by) <= 60.0f;
 }
 

@@ -15,6 +15,13 @@ namespace Playerbot::Local {
 
 // True when the bot should not take this quest yet.
 bool StarterQuestTooEarly(Player const* bot, Quest const* quest);
+// Local (M7): the same newcomer (FreshStart, below StarterLeaveLevel, standing in a starter area) stays in it: no travel to a quest
+// hub outside it and no yielding a crowded quest spot (it has nowhere else to go). Live 2026-10-23, the first half hour of a fresh
+// world: 97% of 260 deaths were level 1-2 bots killed by level 5-7 mobs outside the valleys; a crowded spot ("7 others within
+// 40 y, cap 5") made them drop their quest and walk to a hub 4,700 y away. Any thread.
+bool KeepInStarterArea(uint32 map, float x, float y, uint8 level);
+// True when (tx, ty) lies in the starter area that holds (x, y).
+bool SameStarterArea(uint32 map, float x, float y, float tx, float ty);
 
 // Local (M7): the mirror of upstream's grey-quest skip. A quest more than Playerbot.Bot.SoloQuestLevelMargin (default 2;
 // -1 = off) levels above a solo bot, or that margin + 2 in a group, is red for it: live 2026-10-21 level 3-4 bots took
