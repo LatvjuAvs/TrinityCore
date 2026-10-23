@@ -93,6 +93,7 @@
 #include "Fleet/BotComposition.h"
 #include "Combat/ApRegistry.h"
 #include "Player.h"
+#include "Item.h"   // local (M7): weapon durability in [bot_death]
 #include "Spell.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
@@ -2918,12 +2919,20 @@ void LogPlayerDeath(Player* vp, Unit* killer, BotAI const* vai)
                 }
     uint32 grp_alive = 0, grp_total = 0;
     CountGroupAlive(vp->GetGroup(), vp, grp_alive, grp_total);
+    std::string weapon_dura = "-";
+    if (Item const* w = vp->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
+        if (uint32 const mx = *w->m_itemData->MaxDurability)
+            weapon_dura = std::to_string(*w->m_itemData->Durability * 100u / mx) + "%";
     Playerbot::V2::DeathCause::Note(vp->GetGUID().GetCounter(), fmt::format("{} by {} ({} dmg)", spell_txt, killer_txt, hit.amount));
     TC_LOG_INFO("playerbot.v2",
-        "[bot_death] ts={} {} ({}) map={} pos={:.1f},{:.1f},{:.1f} killer={} spell={} dmg={} overkill={} rule={} killer_at={} spell_data={} class={} grp_alive={}/{}",
+        "[bot_death] ts={} {} ({}) map={} pos={:.1f},{:.1f},{:.1f} killer={} spell={} dmg={} overkill={} rule={} killer_at={} spell_data={} "
+        "lvl={} killer_lvl={} attackers={} weapon_dura={} class={} grp_alive={}/{}",
         uint64(GameTime::GetGameTime()), vp->GetName(), vai ? "bot" : "player", vp->GetMapId(),
         vp->GetPositionX(), vp->GetPositionY(), vp->GetPositionZ(), killer_txt, spell_txt, hit.amount, hit.overkill,
-        rule ? rule : "-", killer_at, spell_data, uint32(vp->GetClass()), grp_alive, grp_total);
+        rule ? rule : "-", killer_at, spell_data,
+        // Local (M7): what kills the low-level world (about 50 deaths per 10 minutes for 220 bots, 2026-10-22).
+        uint32(vp->GetLevel()), killer ? uint32(killer->GetLevel()) : 0u, uint32(vp->getAttackers().size()), weapon_dura,
+        uint32(vp->GetClass()), grp_alive, grp_total);
 
     if (vai)
     {
