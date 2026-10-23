@@ -3046,7 +3046,14 @@ Result API::start_attack(ObjectGuid target, uint8 avoid_school_mask)
         constexpr uint32 AUTO_SHOT = 75;
         if (physical_avoided) return;
         if (p_->GetClass() != CLASS_HUNTER) return;
-        if (p_->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL)) return;
+        // Local (M7): an Auto Shot still running on the previous target is not this one's. It kept the new target from ever
+        // being shot (2026-10-23, fresh world: hunters gave up ~10 times each per half hour, every time in range, in sight,
+        // standing still, with ammo and an intact bow, the target untouched). Retarget it, as a player's new Auto Shot does.
+        if (Spell const* cur = p_->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
+        {
+            if (cur->m_targets.GetUnitTargetGUID() == victim->GetGUID()) return;
+            p_->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
+        }
         if (!p_->HasSpell(AUTO_SHOT)) return;
         if (!p_->GetWeaponForAttack(RANGED_ATTACK, true)) return;
         SpellCastResult const res = p_->CastSpell(victim, AUTO_SHOT, false);
@@ -3237,6 +3244,10 @@ Result API::stop_attack(bool clear_ghost_combat)
 {
     if (!p_) return Result::Other;
     p_->AttackStop();
+    // Local (M7): stopping the attack stops Auto Shot or the wand too, as for a player; left running it stayed on the old
+    // target and the next start_attack skipped its own Auto Shot.
+    if (p_->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
+        p_->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
     if (!p_->IsInCombat())
         p_->SetSheath(SHEATH_STATE_UNARMED);
     // Mirror a real client deselecting on disengage â keeps the published

@@ -414,9 +414,14 @@ void DoPowerInfusion(ApPredicateContext const& ctx, BotIntentEmitter& e)
 // Damage only while everyone is healthy and mana is comfortable. The wand
 // costs no mana (it keeps the five-second rule); spells in a raid also wait
 // for a quiet spell at 90%+ mana (ClassicHeal::RaidHealerMayDamage).
+// Local (M7): a priest on its own levels by Smite. The healer rotation (every priest below the talent levels) only allowed damage
+// once in combat, so a solo priest could never open a fight: 2026-10-23, level 2-3 priests gave up on mobs 13-30 y away, in
+// sight, standing still and not casting. Alone it opens, and spends its mana down to 20% on damage, as a player does.
+bool SoloPriest(ApPredicateContext const& ctx) { return !ctx.group.exists(); }
+
 bool HealerMayWand(ApPredicateContext const& ctx)
 {
-    return HasLiveTarget(ctx) && ctx.bot.in_combat() && WoundedCount(ctx, 90) == 0 && LowestFriendOrSelf(ctx).hp_pct > 90;
+    return HasLiveTarget(ctx) && (ctx.bot.in_combat() || SoloPriest(ctx)) && WoundedCount(ctx, 90) == 0 && LowestFriendOrSelf(ctx).hp_pct > 90;
 }
 bool HealerMayDps(ApPredicateContext const& ctx)
 {
@@ -425,14 +430,14 @@ bool HealerMayDps(ApPredicateContext const& ctx)
 
 bool ShouldHealerPain(ApPredicateContext const& ctx)
 {
-    return HealerMayDps(ctx) && ManaPct(ctx) >= 50 && (Ready(ctx, SHADOW_WORD_PAIN) && ctx.bot.victim_in_spell_range(SHADOW_WORD_PAIN))
+    return HealerMayDps(ctx) && ManaPct(ctx) >= (SoloPriest(ctx) ? 20 : 50) && (Ready(ctx, SHADOW_WORD_PAIN) && ctx.bot.victim_in_spell_range(SHADOW_WORD_PAIN))
         && !ctx.bot.has_aura(SHADOW_WORD_PAIN, ctx.bot.victim());
 }
 void DoPain(ApPredicateContext const& ctx, BotIntentEmitter& e) { e.cast(SHADOW_WORD_PAIN, ctx.bot.victim()); }
 
 bool ShouldHealerSmite(ApPredicateContext const& ctx)
 {
-    return HealerMayDps(ctx) && ManaPct(ctx) >= 70 && (Ready(ctx, SMITE) && ctx.bot.victim_in_spell_range(SMITE));
+    return HealerMayDps(ctx) && ManaPct(ctx) >= (SoloPriest(ctx) ? 20 : 70) && (Ready(ctx, SMITE) && ctx.bot.victim_in_spell_range(SMITE));
 }
 void DoSmite(ApPredicateContext const& ctx, BotIntentEmitter& e) { e.cast(SMITE, ctx.bot.victim()); }
 
