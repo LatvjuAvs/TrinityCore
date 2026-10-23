@@ -16965,10 +16965,13 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
                 30.0f;
             const float kEngageRangeSq = kEngageRange * kEngageRange;
             constexpr int32 kMinHpPctToTag = 50;
+            // Local (M7): a player picks a fight with a mob at most a level or two above him. +4 (+5 aggressive) killed the
+            // low-level world: 2026-10-23, 59 of 93 deaths in 20 minutes were to a mob 2 or more levels above the bot (3 above:
+            // 25), 43 with two or more attackers; gear broke faster than poor bots could repair it.
             const uint8 levelSpan =
-                agg == Aggression::Defensive ? 2u :
-                agg == Aggression::Aggressive ? 5u :
-                4u;
+                agg == Aggression::Defensive ? 0u :
+                agg == Aggression::Aggressive ? 2u :
+                1u;
             const uint8 botLevel = s.level();
             // Retail level scaling (Chromie Time / zone scaling) scales a zone's
             // mobs UP to the bot's level, so a LOWER-base-level mob in the bot's
@@ -16990,7 +16993,9 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
             // candidate (no other live hostile within the cluster radius); prefer
             // it over a closer-but-packed one. Falls back to `best` when nothing is
             // isolated, so the bot still grinds in a dense camp (never frozen).
-            const bool conservative_pull = pull_discipline ||
+            // Local (M7): every solo bot prefers a mob standing alone (no other within 12 y), as players do; a pack is fought
+            // only when nothing else is near. 46% of deaths had two or more attackers (2026-10-23).
+            const bool conservative_pull = pull_discipline || !s.in_group() ||
                 (s.cls() == CLASS_WARLOCK && !s.knows_spell(697 /*Summon Voidwalker*/));
             NearbyUnit const* bestIso     = nullptr;
             float             bestIsoDist = kEngageRangeSq + 1.f;
