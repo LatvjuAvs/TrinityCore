@@ -13,6 +13,7 @@
 // Infusion on a caster in boss fights, then wand/Smite filler only
 // while nobody needs healing.
 
+#include "Fleet/QuestParty.h"
 #include "Player.h"        // EQUIPMENT_SLOT_RANGED (local, M7)
 #include "ItemTemplate.h"  // ITEM_SUBCLASS_WEAPON_WAND
 #include "../ApRegistry.h"
@@ -427,14 +428,19 @@ void DoPowerInfusion(ApPredicateContext const& ctx, BotIntentEmitter& e)
 // Local (M7): a priest on its own levels by Smite. The healer rotation (every priest below the talent levels) only allowed damage
 // once in combat, so a solo priest could never open a fight: 2026-10-23, level 2-3 priests gave up on mobs 13-30 y away, in
 // sight, standing still and not casting. Alone it opens, and spends its mana down to 20% on damage, as a player does.
-bool SoloPriest(ApPredicateContext const& ctx) { return !ctx.group.exists(); }
+// A quest party (Fleet/QuestParty.h) quests like solo players side by side, so its priest opens its own fights too (Aurore, level
+// 2 in a party of 2, gave up 17 times in half an hour at 25 y: the healer gate waited for a fight someone else would start).
+bool SoloPriest(ApPredicateContext const& ctx)
+{
+    return !ctx.group.exists() || ::Playerbot::V2::QuestParty::IsMember(ctx.bot.bot_id());
+}
 
 bool HealerMayWand(ApPredicateContext const& ctx)
 {
     // Alone, only its own health counts (above half): the patient pick also takes wounded strangers, and in a crowded starter
     // valley someone always is, so a solo priest healed passers-by and never opened (Nikalen, level 2: 2 Smites in 13 minutes).
     if (SoloPriest(ctx))
-        return HasLiveTarget(ctx) && ctx.bot.hp_pct() > 50;
+        return HasLiveTarget(ctx) && ctx.bot.hp_pct() > 50 && WoundedCount(ctx, 50) == 0;   // in a quest party: the partner too
     return HasLiveTarget(ctx) && ctx.bot.in_combat() && WoundedCount(ctx, 90) == 0 && LowestFriendOrSelf(ctx).hp_pct > 90;
 }
 bool HealerMayDps(ApPredicateContext const& ctx)
