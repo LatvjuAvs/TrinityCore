@@ -17,6 +17,8 @@
 // Polymorph on an add (PickGroupCC). Skipped: Blink, Mana Shield,
 // Pyroblast opener, Cone of Cold.
 
+#include "Player.h"        // EQUIPMENT_SLOT_RANGED (local, M7)
+#include "ItemTemplate.h"  // ITEM_SUBCLASS_WEAPON_WAND
 #include "../ApRegistry.h"
 #include "../ApRotation.h"
 #include "Apl_Baseline_Common.h"
@@ -286,9 +288,17 @@ void DoScorch(ApPredicateContext const& ctx, BotIntentEmitter& e) { e.cast(SCORC
 bool ShouldSchoolNuke(ApPredicateContext const& ctx) { return SchoolHint::ShouldCast(ctx, kSchoolChoices); }
 void DoSchoolNuke(ApPredicateContext const& ctx, BotIntentEmitter& e) { SchoolHint::DoCast(ctx, e, kSchoolChoices); }
 
+// Local (M7): Shoot needs a wand in the ranged slot; a fresh character has none, and every try failed with EQUIPPED_ITEM_CLASS
+// ahead of the spells that would have opened the fight (2026-10-23).
+bool HasUsableWand(ApPredicateContext const& ctx)
+{
+    auto const& r = ctx.bot.raw().inventory.equipped[EQUIPMENT_SLOT_RANGED];
+    return r.entry != 0 && r.durability_pct > 0 && ctx.bot.raw().consumables.ranged_subclass == ITEM_SUBCLASS_WEAPON_WAND;
+}
+
 bool ShouldWand(ApPredicateContext const& ctx)
 {
-    return HasLiveTarget(ctx) && (Ready(ctx, SHOOT_WAND) && ctx.bot.victim_in_spell_range(SHOOT_WAND)) && ctx.bot.current_cast_spell_id() == 0
+    return HasLiveTarget(ctx) && HasUsableWand(ctx) && (Ready(ctx, SHOOT_WAND) && ctx.bot.victim_in_spell_range(SHOOT_WAND)) && ctx.bot.current_cast_spell_id() == 0
         && ManaPct(ctx) < NukeManaFloor(ctx);
 }
 void DoWand(ApPredicateContext const& ctx, BotIntentEmitter& e) { e.cast(SHOOT_WAND, ctx.bot.victim()); }
