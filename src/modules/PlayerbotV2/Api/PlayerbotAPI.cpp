@@ -5724,20 +5724,6 @@ static Result UseItemImpl(Player* p, Item* item, ObjectGuid target)
                     p->GetSpellHistory()->IsReady(si, item->GetEntry()) ? 1 : 0, si->TargetAuraSpell,
                     si->TargetAuraSpell ? (tu->HasAura(si->TargetAuraSpell) ? 1 : 0) : -1, p->IsNonMeleeSpellCast(false) ? 1 : 0,
                     uint32(tu->GetAppliedAuras().size()), sSpellMgr->GetSpellInfo(17743, DIFFICULTY_NONE) ? 1 : 0, tu->HasAura(17743) ? 1 : 0);
-        // Peons carry no auras at all (2026-10-23): dump the sleep spell and try it once on the peon to see why it won't stick.
-        static std::atomic<uint32> s_sleep{ 0 };
-        if (useSpellId == 19938 && s_sleep.fetch_add(1, std::memory_order_relaxed) < 3u)
-            if (SpellInfo const* sl = sSpellMgr->GetSpellInfo(17743, DIFFICULTY_NONE))
-            {
-                std::string effs;
-                for (SpellEffectInfo const& e : sl->GetEffects())
-                    effs += fmt::format("[eff={} aura={} ta={} tb={} base={}]", uint32(e.Effect), uint32(e.ApplyAuraName),
-                        uint32(e.TargetA.GetTarget()), uint32(e.TargetB.GetTarget()), e.BasePoints);
-                SpellCastResult r = tu->CastSpell(tu, 17743, true);
-                TC_LOG_INFO("playerbot.v2", "[sleep_probe] target={} effs={} attr0={:#x} attrEx={:#x} interrupt={:#x} mechanic={} duration={} cast={} has_after={} auras_after={}",
-                    tu->GetName(), effs, sl->Attributes, sl->AttributesEx, uint32(sl->AuraInterruptFlags.AsUnderlyingType()),
-                    sl->Mechanic, sl->GetMaxDuration(), uint32(r), tu->HasAura(17743) ? 1 : 0, uint32(tu->GetAppliedAuras().size()));
-            }
     }
     p->CastItemUseSpell(item, useSpellId, targets, ObjectGuid::Empty, /*misc*/ {});
     return Result::Ok;

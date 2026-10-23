@@ -20,6 +20,7 @@
 #include "MotionMaster.h"
 #include "Player.h"
 #include "ScriptMgr.h"
+#include "Log.h"
 #include "ScriptedCreature.h"
 #include "Spell.h"
 #include "SpellAuraEffects.h"
@@ -108,6 +109,7 @@ public:
                 player->KilledMonsterCredit(me->GetEntry(), me->GetGUID());
                 Talk(SAY_SPELL_HIT, caster);
                 me->RemoveAllAuras();
+                RebuffTimer = 120000; // Local (M7): works two minutes, then dozes off again
                 if (GameObject* Lumberpile = me->FindNearestGameObject(GO_LUMBERPILE, 20))
                     me->GetMotionMaster()->MovePoint(1, Lumberpile->GetPositionX()-1, Lumberpile->GetPositionY(), Lumberpile->GetPositionZ());
             }
@@ -117,10 +119,16 @@ public:
         {
             if (work == true)
                 me->HandleEmoteCommand(EMOTE_ONESHOT_WORK_CHOPWOOD);
+            // Local (M7, 2026-10-23): Sleep lasts 2 minutes but was recast every 5, so a peon was awake 3 minutes in 5 and
+            // the Blackjack (which needs the target asleep) failed on it. Fall asleep again as soon as the aura is gone.
             if (RebuffTimer <= diff)
             {
-                DoCast(me, SPELL_BUFF_SLEEP);
-                RebuffTimer = 300000; //Rebuff agian in 5 minutes
+                if (!me->HasAura(SPELL_BUFF_SLEEP))
+                {
+                    work = false;
+                    DoCast(me, SPELL_BUFF_SLEEP);
+                }
+                RebuffTimer = 5000;
             }
             else
                 RebuffTimer -= diff;
