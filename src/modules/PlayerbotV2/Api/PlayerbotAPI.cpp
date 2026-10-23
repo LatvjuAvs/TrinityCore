@@ -5719,7 +5719,21 @@ Result API::use_item_by_entry(uint32 item_entry, ObjectGuid target)
 {
     if (!p_) return Result::Other;
     if (!p_->IsAlive()) return Result::Locked;
-    return UseItemImpl(p_, p_->GetItemByEntry(item_entry), target);
+    Item* item = p_->GetItemByEntry(item_entry);
+    Result const r = UseItemImpl(p_, item, target);
+    // Local (M7): quest items used on a target (Lazy Peons 5441: 46 holders, none finished, Awaken Peon 19938 never cast;
+    // 2026-10-23). One line in ten, with the outcome.
+    if (!target.IsEmpty() && target != p_->GetGUID())
+    {
+        static std::atomic<uint32> s_n{ 0 };
+        if (s_n.fetch_add(1, std::memory_order_relaxed) % 10u == 0u)
+        {
+            Unit const* tu = ObjectAccessor::GetUnit(*p_, target);
+            TC_LOG_INFO("playerbot.v2", "[use_item_on] {} item={} {} target={} dist={:.1f} result={}", p_->GetName(), item_entry,
+                item ? "held" : "missing", tu ? tu->GetName() : target.ToString(), tu ? p_->GetExactDist(tu) : -1.0f, uint32(r));
+        }
+    }
+    return r;
 }
 
 Result API::use_item_by_slot(uint8 bag, uint8 slot, ObjectGuid target)
