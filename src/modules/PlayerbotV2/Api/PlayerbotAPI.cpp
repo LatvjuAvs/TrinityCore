@@ -5711,6 +5711,19 @@ static Result UseItemImpl(Player* p, Item* item, ObjectGuid target)
     if (!useSpellId)
         return Result::Other;
 
+    // Local (M7): Lazy Peons (2026-10-23): ~130 "successful" Blackjack uses on Lazy Peons, no credit. CastItemUseSpell drops the
+    // cast result; say what usually blocks a targeted item spell (one line in ten).
+    if (Unit* tu = targets.GetUnitTarget(); tu && tu != p)
+    {
+        static std::atomic<uint32> s_n{ 0 };
+        if (s_n.fetch_add(1, std::memory_order_relaxed) % 10u == 0u)
+            if (SpellInfo const* si = sSpellMgr->GetSpellInfo(useSpellId, DIFFICULTY_NONE))
+                TC_LOG_INFO("playerbot.v2", "[item_spell] {} item={} spell={} target={} explicit={} target_check={} ready={} "
+                    "target_aura={} has_it={} casting_before={}", p->GetName(), item->GetEntry(), useSpellId, tu->GetName(),
+                    uint32(si->CheckExplicitTarget(p, tu)), uint32(si->CheckTarget(p, tu, false)),
+                    p->GetSpellHistory()->IsReady(si, item->GetEntry()) ? 1 : 0, si->TargetAuraSpell,
+                    si->TargetAuraSpell ? (tu->HasAura(si->TargetAuraSpell) ? 1 : 0) : -1, p->IsNonMeleeSpellCast(false) ? 1 : 0);
+    }
     p->CastItemUseSpell(item, useSpellId, targets, ObjectGuid::Empty, /*misc*/ {});
     return Result::Ok;
 }
