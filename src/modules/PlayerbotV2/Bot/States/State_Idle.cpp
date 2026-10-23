@@ -19030,7 +19030,7 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
                 // Skipped in BG / instance (server rejects there).
                 if (!s.in_battleground() &&
                     s.can_hearth() &&
-                    s.homebind_map_id() != 0 &&
+                    s.has_homebind() &&   // local (M7): was homebind_map_id() != 0, never true on Eastern Kingdoms
                     s.homebind_map_id() == poi.map_id)
                 {
                     emit.hearth();
@@ -20078,7 +20078,7 @@ bool AutoactDispatch(BotSnapshotView const& s, BotAI& ai,
                 // No known-good node within 800y — last resort: homebind
                 // teleport so the bot isn't frozen off-mesh forever.
                 const auto& tr = s.raw().travel;
-                if (tr.homebind_map_id != 0)
+                if (s.has_homebind())   // local (M7): was homebind_map_id != 0, never true on Eastern Kingdoms
                 {
                     emit.emit(TeleportToIntent{
                         tr.homebind_map_id,

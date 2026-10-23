@@ -792,6 +792,8 @@ public:
     // Homebind position (Player::m_homebind copy). Used by the
     // hearth-leg of the cross-map cascade.
     uint32 homebind_map_id() const { return s_->travel.homebind_map_id; }
+    // Local (M7): map 0 (Eastern Kingdoms) is a real homebind map, so "has one" is a non-zero position, not a non-zero map.
+    bool   has_homebind() const { return s_->travel.homebind_x != 0.f || s_->travel.homebind_y != 0.f; }
     float  homebind_x() const { return s_->travel.homebind_x; }
     float  homebind_y() const { return s_->travel.homebind_y; }
     float  homebind_z() const { return s_->travel.homebind_z; }

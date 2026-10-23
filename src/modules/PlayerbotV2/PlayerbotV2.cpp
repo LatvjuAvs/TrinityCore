@@ -607,7 +607,9 @@ void GlobalStuckRescue(Player* p, BotAI* ai)
     WorldLocation tgt;
     auto snap = Services::Snapshots().latest(key);
     if (!homebind_proven_bad &&
-        snap && snap->travel.homebind_map_id != 0)
+        // Local (M7, 2026-10-23): was `homebind_map_id != 0`, so every bot homebound on Eastern Kingdoms (map 0) went to the
+        // faction capital instead: Northshire humans to the Stormwind inn, Tirisfal undead to Orgrimmar on the other continent.
+        snap && (snap->travel.homebind_x != 0.f || snap->travel.homebind_y != 0.f))
     {
         tgt = WorldLocation(snap->travel.homebind_map_id,
                             snap->travel.homebind_x,
