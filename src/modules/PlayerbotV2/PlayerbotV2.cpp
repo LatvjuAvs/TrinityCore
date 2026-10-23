@@ -620,6 +620,12 @@ void GlobalStuckRescue(Player* p, BotAI* ai)
     {
         const bool alliance = (p->GetTeam() == ALLIANCE);
         tgt = FindCapitalRescuePos(alliance);
+        // Local (M7, 2026-10-23): below level 10 the capital is the trap, not the way out (Theresie: five escalations in 20 min,
+        // each walk from the Stormwind inn ended in the same canal pocket). Use the race's start point, where new characters
+        // appear and the bot's own quests are.
+        if (p->GetLevel() < 10)
+            if (PlayerInfo const* info = sObjectMgr->GetPlayerInfo(p->GetRace(), p->GetClass()))
+                tgt = info->createPosition.Loc;
         if (homebind_proven_bad)
         {
             TC_LOG_WARN("playerbot.v2",
