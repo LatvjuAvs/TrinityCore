@@ -284,7 +284,7 @@ bool QuestAcceptFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView cons
         // Hold follow-recall off while we work through a multi-quest hub —
         // grouped bots otherwise get yanked away between accepts.
         ai.grant_detour(s.published_at_ms());
-        if (ai.hearth_zone() != s.zone_id())
+        if (ai.hearth_zone() != s.zone_id() && !::Playerbot::Local::NoHearthBindHere(s.zone_id(), s.level()))   // local (M7)
         {
             constexpr float kInnBindRangeSq = 80.0f * 80.0f;
             if (auto const* inn = s.nearest_npc_with_flag(UNIT_NPC_FLAG_INNKEEPER))

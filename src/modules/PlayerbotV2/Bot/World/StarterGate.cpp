@@ -92,6 +92,13 @@ bool SameStarterArea(uint32 map, float x, float y, float tx, float ty)
     return std::any_of(kStarts.begin(), kStarts.end(), [&](StartPoint const& sp) { return Inside(sp, map, x, y) && Inside(sp, map, tx, ty); });
 }
 
+bool NoHearthBindHere(uint32 zone_id, uint8 level)
+{
+    // Stormwind, Ironforge, Darnassus, The Exodar, Undercity, Orgrimmar, Thunder Bluff, Silvermoon City.
+    static constexpr std::array<uint32, 8> kCapitals = { 1519, 1537, 1657, 3557, 1497, 1637, 1638, 3487 };
+    return level < 10 && std::find(kCapitals.begin(), kCapitals.end(), zone_id) != kCapitals.end();
+}
+
 bool QuestTooHardForBot(Player const* bot, Quest const* quest)
 {
     static int32 const margin = sConfigMgr->GetIntDefault("Playerbot.Bot.SoloQuestLevelMargin", 2, true);

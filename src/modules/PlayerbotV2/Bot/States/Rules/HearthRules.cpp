@@ -12,6 +12,7 @@
 #include "Bot/BotIntentEmitter.h"
 #include "UnitDefines.h"
 #include "World/WorldMetadata.h"
+#include "Bot/World/StarterGate.h"   // local (M7): NoHearthBindHere
 
 #include <cmath>
 #include <limits>
@@ -28,6 +29,7 @@ bool WalkInnkeeperGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView co
     const uint32 zid = s.zone_id();
     if (zid == 0) return false;
     if (ai.hearth_zone() == zid) return false;
+    if (::Playerbot::Local::NoHearthBindHere(zid, s.level())) return false;   // local (M7)
     if (s.has_actionable_quest()) return false;   // quest work in reach wins; the quest walkers would pull the bot back over the 80 y line
     return ai.ms_in_zone(zid) >= ::Playerbot::BotAI::kHearthRebindThresholdMs;
 }
@@ -121,6 +123,7 @@ bool HomebindGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&,
             ai.set_last_homebind_innkeeper(ObjectGuid::Empty);
         return false;
     }
+    if (::Playerbot::Local::NoHearthBindHere(s.zone_id(), s.level())) return false;   // local (M7)
     return ai.last_homebind_innkeeper() != inn->guid;
 }
 
