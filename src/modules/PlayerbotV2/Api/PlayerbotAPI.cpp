@@ -1564,17 +1564,47 @@ Result API::move_to(float x, float y, float z, bool run, bool direct, bool drop,
             return true;
         }()))
     {
-        static std::unordered_map<uint64, uint32> s_guardAt;
+        // Local (M7): a bot refused for 5 minutes on end is stranded up there (Cellengi at Stormwind z 121, Arianne on a Thunder Bluff mesa,
+        // 2026-10-31): for a minute it may take the lower layer, which beats never reaching its goal.
+        struct GuardState { uint32 logged = 0, first = 0, last = 0, release_until = 0; };
+        static std::mutex s_guardMutex;
+        static std::unordered_map<uint64, GuardState> s_guard;
         uint32 const gnow = GameTime::GetGameTimeMS();
-        uint32& gat = s_guardAt[p_->GetGUID().GetCounter()];
-        if (gat == 0 || gnow - gat >= 10000u)
+        bool released = false, log_refusal = false, log_release = false;
         {
-            gat = gnow ? gnow : 1u;
+            std::lock_guard<std::mutex> lock(s_guardMutex);
+            GuardState& g = s_guard[p_->GetGUID().GetCounter()];
+            if (g.release_until && int32(g.release_until - gnow) > 0)
+                released = true;
+            else
+            {
+                g.release_until = 0;
+                if (g.first == 0 || gnow - g.last > 60000u)
+                    g.first = gnow ? gnow : 1u;
+                g.last = gnow;
+                if (gnow - g.first >= 300000u)
+                {
+                    g.release_until = (gnow + 60000u) ? (gnow + 60000u) : 1u;
+                    g.first = 0;
+                    released = log_release = true;
+                }
+                else if (g.logged == 0 || gnow - g.logged >= 10000u)
+                {
+                    g.logged = gnow ? gnow : 1u;
+                    log_refusal = true;
+                }
+            }
+        }
+        if (log_release)
+            TC_LOG_INFO("playerbot.v2", "[level_guard] {} released after 5 minutes of refusals: z={:.1f} ground={:.1f}", p_->GetName(), z_ask, z);
+        if (log_refusal)
             TC_LOG_INFO("playerbot.v2", "[level_guard] {} refused a same-level move across a drop: z={:.1f} dst=({:.1f},{:.1f}) ground={:.1f}",
                         p_->GetName(), z_ask, x, y, z);
+        if (!released)
+        {
+            NotePathFail(p_, PathDestKey(p_->GetMapId(), x, y), GameTime::GetGameTimeMS());
+            return Result::Locked;
         }
-        NotePathFail(p_, PathDestKey(p_->GetMapId(), x, y), GameTime::GetGameTimeMS());
-        return Result::Locked;
     }
     BotMovement::SnapToGround(p_, x, y, z);
 
