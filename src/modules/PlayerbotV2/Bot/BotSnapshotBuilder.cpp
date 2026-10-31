@@ -3096,6 +3096,9 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                     if (eff->TriggerType == ITEM_SPELLTRIGGER_ON_USE)
                     {
                         dst.on_use_spell_id = static_cast<uint32>(eff->SpellID);
+                        if (SpellInfo const* use_info = sSpellMgr->GetSpellInfo(eff->SpellID, DIFFICULTY_NONE))
+                            if (SpellHistory const* use_hist = p->GetSpellHistory(); use_hist && use_hist->HasCooldown(use_info, item->GetEntry()))
+                                dst.on_use_cd_ms = static_cast<uint32>(std::max<int64>(1, use_hist->GetRemainingCooldown(use_info).count()));
                         break;
                     }
                 }
@@ -3295,7 +3298,12 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
         uint8 const want = gun ? ITEM_SUBCLASS_BULLET : ITEM_SUBCLASS_ARROW;
         for (auto const& it : snap->inventory.bag_items)
             if (it.item_class == ITEM_CLASS_PROJECTILE && it.item_subclass == want)
-                snap->consumables.ammo_count += it.count;
+            {
+                // A stack the bot cannot use yet (above its level) is no ammo: AutoSelectAmmo skips it as well.
+                ItemTemplate const* ammo_proto = sObjectMgr->GetItemTemplate(it.entry);
+                if (ammo_proto && p->CanUseItem(ammo_proto) == EQUIP_ERR_OK)
+                    snap->consumables.ammo_count += it.count;
+            }
     }
 
     // Wand damage school, the same rule Spell::Spell applies to a wand user's
@@ -3857,6 +3865,11 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
     {
         if (Spell* casting = p->GetCurrentSpell(static_cast<CurrentSpellTypes>(slot)))
         {
+            // A cast whose cast time is over and whose projectile is still in flight (LAUNCHED) is no longer a cast in progress: the core
+            // accepts the next cast (Unit::IsNonMeleeSpellCast skips it) and the bot is free to act. Counting it held every caster idle for the
+            // flight time of its Fireball / Frostbolt / Shadow Bolt (0.4-0.9 s after each, ~15 s of every 120).
+            if (slot == CURRENT_GENERIC_SPELL && casting->getState() == SPELL_STATE_LAUNCHED)
+                continue;
             snap->cast.is_casting           = true;
             snap->cast.current_cast_spell_id = casting->m_spellInfo->Id;
             const int32 rem            = casting->GetRemainingCastTime();
@@ -3887,9 +3900,11 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
     threat_tanks.clear();
     snap->combat.group_tank = ObjectGuid::Empty;
     snap->combat.big_raid = false;
+    snap->combat.raid_group = false;
     if (Group const* tg = p->GetGroup())
     {
         snap->combat.big_raid = tg->GetMembersCount() > 15;
+        snap->combat.raid_group = tg->isRaidGroup();
         for (auto const& slot : tg->GetMemberSlots())
         {
             Player* mp = slot.guid == p->GetGUID() ? p : ObjectAccessor::GetPlayer(*p, slot.guid);
@@ -4044,10 +4059,15 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
             if (CreatureTemplate const* act = ac->GetCreatureTemplate())
             {
                 u.creature_type = uint8(act->type);
-                if (act->unit_flags & UNIT_FLAG_PACIFIED)
-                    u.is_pacified = true;
-                if (act->unit_flags & UNIT_FLAG_UNINTERACTIBLE)
-                    u.untargetable = true;
+                // The template flags mark static props. A unit that is hitting somebody is no prop: an event boss
+                // (Pyroguard Emberseer) is spawned with them and its script clears them on the live unit.
+                if (!ac->GetVictim())
+                {
+                    if (act->unit_flags & UNIT_FLAG_PACIFIED)
+                        u.is_pacified = true;
+                    if (act->unit_flags & UNIT_FLAG_UNINTERACTIBLE)
+                        u.untargetable = true;
+                }
             }
         }
         // Attacker-side CC scan — same shape as nearby_enemies. Without
@@ -4079,6 +4099,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 if (IsDemoApDebuff(asi->Id))
                     NoteApDebuff(u, abase);
                 if (asi->Mechanic == MECHANIC_ROOT) u.root_caster = abase->GetCasterGUID();   // MarkCc: Entangling Roots up (not CC-locked)
+                if (asi->Mechanic == MECHANIC_ROOT || asi->Mechanic == MECHANIC_SNARE) u.snared = true;   // Concussive Shot, Wing Clip, Frostbolt: a hunter can step back
                 int pri = -1;
                 switch (asi->Mechanic)
                 {
@@ -4692,10 +4713,16 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 {
                     // CreatureType is uint8 in TC; Beast=1, etc.
                     u.creature_type = uint8(ct->type);
-                    if (ct->unit_flags & UNIT_FLAG_PACIFIED)
-                        u.is_pacified = true;
-                    if (ct->unit_flags & UNIT_FLAG_UNINTERACTIBLE)
-                        u.untargetable = true;
+                    // Static props only: a unit that is hitting somebody is no prop. Pyroguard Emberseer is spawned with these flags
+                    // and its script clears them on the live unit, so the template flags kept the attackable boss out of the
+                    // raid tracker and the DPS stood idle (UBRS 20 Oct).
+                    if (!c->GetVictim())
+                    {
+                        if (ct->unit_flags & UNIT_FLAG_PACIFIED)
+                            u.is_pacified = true;
+                        if (ct->unit_flags & UNIT_FLAG_UNINTERACTIBLE)
+                            u.untargetable = true;
+                    }
                     // Elite / RareElite / Rare = legit high-HP, slow kills; the
                     // unkillable-target leash must never abandon them.
                     u.is_elite_or_rare =
@@ -4806,6 +4833,7 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 if (IsDemoApDebuff(asi->Id))
                     NoteApDebuff(u, abase);
                 if (asi->Mechanic == MECHANIC_ROOT) u.root_caster = abase->GetCasterGUID();   // MarkCc: Entangling Roots up (not CC-locked)
+                if (asi->Mechanic == MECHANIC_ROOT || asi->Mechanic == MECHANIC_SNARE) u.snared = true;   // Concussive Shot, Wing Clip, Frostbolt: a hunter can step back
                 int pri = -1;
                 switch (asi->Mechanic)
                 {
@@ -8302,6 +8330,49 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 }
                 snap->world_objects.nearby_objects.push_back(n);
             }
+
+            // Tram cars (type-11 GOs that run between two stations on one map, the Deeprun Tram): they sit in the grid, so the
+            // MO-transport set above never holds them, and the 30 y object scan only sees one standing right beside the bot. A
+            // bot waiting on the platform for a ride looked at "transports in sight 0" for 300 s, then gave the route up. The
+            // cars are few and known (PortalIndex), so look them up by spawn id within the same 200 y.
+            if (Services::Initialized() && Services::Portals().IsInitialized())
+            {
+                auto const& car_ids = Services::Portals().ShuttleSpawnIds(p->GetMapId());
+                if (!car_ids.empty())
+                {
+                    static std::atomic<uint32> s_carLogAt{0};
+                    uint32 const cnow = GameTime::GetGameTimeMS();
+                    uint32 last = s_carLogAt.load(std::memory_order_relaxed);
+                    if (cnow - last >= 120000u && s_carLogAt.compare_exchange_strong(last, cnow ? cnow : 1u))
+                    {
+                        size_t in_world = 0;
+                        for (uint64 const id : car_ids)
+                            if (GameObject* c = tmap->GetGameObjectBySpawnId(id); c && c->IsInWorld()) ++in_world;
+                        TC_LOG_INFO("playerbot.v2", "[xport_cars] map {}: {} tram cars known, {} in the world; {} sees {:.0f},{:.0f},{:.0f}",
+                            p->GetMapId(), car_ids.size(), in_world, p->GetName(), p->GetPositionX(), p->GetPositionY(), p->GetPositionZ());
+                    }
+                }
+                for (uint64 const spawn_id : car_ids)
+                {
+                    GameObject* car = tmap->GetGameObjectBySpawnId(spawn_id);
+                    if (!car || !car->IsInWorld()) continue;
+                    const float cdx = car->GetPositionX() - p->GetPositionX();
+                    const float cdy = car->GetPositionY() - p->GetPositionY();
+                    const float cdz = car->GetPositionZ() - p->GetPositionZ();
+                    if (cdx*cdx + cdy*cdy + cdz*cdz > kTransportScanSq) continue;
+                    bool const have = std::any_of(snap->world_objects.nearby_objects.begin(), snap->world_objects.nearby_objects.end(),
+                        [&](BotSnapshot::NearbyObject const& o) { return o.guid == car->GetGUID(); });
+                    if (have) continue;
+                    BotSnapshot::NearbyObject n{};
+                    n.guid    = car->GetGUID();
+                    n.entry   = car->GetEntry();
+                    n.go_type = car->GetGoType();
+                    n.x = car->GetPositionX();
+                    n.y = car->GetPositionY();
+                    n.z = car->GetPositionZ();
+                    snap->world_objects.nearby_objects.push_back(n);
+                }
+            }
         }
 
         // ---- Extended gathering-node scan (200y) ----
@@ -10686,6 +10757,17 @@ std::shared_ptr<BotSnapshot const> BotSnapshotBuilder::Build(Player* p, BotAI* b
                 snap->craft_orders.want_payment_copper = payment;
             }
         }
+    }
+
+    // Playerbot.World.Questing = 0: a bot of the world (no owner, no group) sees no quests, so nothing sends it to a giver, a hub or a quest
+    // objective; it grinds and roams (idle:grind_roam). A companion keeps its quests (CompanionQuest).
+    if (!Services::Config().world_questing() && snap->owner_guid.IsEmpty() && snap->owner_name.empty() && snap->group.group_guid.IsEmpty() && !snap->led_by_player)
+    {
+        uint16 const completed = snap->quest_log.completed_quest_count;
+        snap->quest_log.reset();
+        snap->quest_log.completed_quest_count = completed;
+        snap->quest_discovery.quest_offers.clear();
+        snap->quest_discovery.quest_turnins.clear();
     }
 
     return snap;

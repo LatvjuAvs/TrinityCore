@@ -5,6 +5,7 @@
 
 #include "ScriptMgr.h"
 #include <set>
+#include <unordered_set>
 
 #include "BattlegroundMgr.h"
 #include "BattlegroundPackets.h"
@@ -12,6 +13,7 @@
 #include "ChatCommand.h"
 #include "CharacterCache.h"
 #include "DatabaseEnv.h"
+#include "Creature.h"
 #include "GameObject.h"          // .playerbot bgzones â control-zone census
 #include "Group.h"
 #include "GroupMgr.h"
@@ -27,10 +29,14 @@
 #include "Log.h"
 #include <fstream>
 #include "Player.h"
+#include "GameTime.h"
+#include "MovementPackets.h"
 #include "WorldSession.h"
 #include "TypeContainerVisitor.h"
 #include "PlayerbotAPI.h"
 #include "PlayerbotV2.h"
+#include "LfgBotFill.h"
+#include "StringFormat.h"
 #include "PlayerbotMovement.h"  // BotMovement::SafeTeleport for GM summonall
 #include "RBAC.h"
 #include "SpellHistory.h"
@@ -41,7 +47,9 @@
 #include "Diagnostics/BotInspector.h"
 #include "Diagnostics/BotSmokeTest.h"
 #include "Diagnostics/CreatureStats.h"
+#include "Diagnostics/DamageParity.h"
 #include "Diagnostics/SpellAuditFormat.h"
+#include "Diagnostics/SpellCheckExpected.h"
 #include "Diagnostics/ScenarioRunner.h"
 #include "Fleet/BotAccountMgr.h"
 #include "Fleet/BotCharacterFactory.h"
@@ -75,10 +83,17 @@
 #include "Bot/BotSnapshot.h"
 #include "Bot/BotSnapshotView.h"
 #include "Session/AddonControl.h"
+#include "Session/LazyLock.h"
 #include "World/WorldMetadata.h"
 #include "ObjectMgr.h"
+#include "SpellAuraEffects.h"
+#include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "Trainer.h"
+#include "TraitMgr.h"
+#include "Containers.h"
+#include "MapUtils.h"
 #include "DB2Stores.h"
 #include "HandcraftedRoadStorage.h"   // .playerbot reloadroutes â road segment reload
 #include "HandcraftedRoadGraph.h"     // .playerbot reloadroutes â invalidate road graph cache
@@ -588,6 +603,13 @@ public:
             { "scenario",      HandleScenario,      rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
             { "creaturestats", HandleCreatureStats, rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
             { "spellaudit",    HandleSpellAudit,    rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
+            { "spellcheck",    HandleSpellCheck,    rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
+            { "auracheck",     HandleAuraCheck,     rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
+            { "proccheck",     HandleProcCheck,     rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
+            { "casttest",      HandleCastTest,      rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
+            { "learncheck",    HandleLearnCheck,    rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
+            { "traitcheck",    HandleTraitCheck,    rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
+            { "talentwalk",    HandleTalentWalk,    rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
             { "graveyardscan", HandleGraveyardScan, rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
             { "wipefleet",     HandleWipeFleet,     rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
             { "roadstats",     HandleRoadStats,     rbac::RBAC_PERM_COMMAND_GM, Console::Yes },
@@ -603,6 +625,7 @@ public:
             // caps total simultaneously-owned alts per account.
             { "summon",        HandleSummon,        rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::No  },
             { "self",          HandleSelf,          rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::No  },
+            { "lazy",          HandleLazy,          rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::No  },
         };
         // One-step companions for the player at the keyboard: `.bot add warrior tank` creates the bot, binds it to the
         // caller's character, levels it to them, teaches its spells, sets role/talents/gear, brings it over and groups it.
@@ -613,6 +636,7 @@ public:
             { "about",         HandleBotAbout,      rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::Yes },
             { "addon",         HandleBotAddonHello, rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::No },
             { "add",           HandleBotAdd,        rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::No  },
+            { "lfg",           HandleBotLfg,        rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::No  },
             { "call",          HandleBotCall,       rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::No  },
             // Every player: brings the caller's own bots only (`.bot summon all|saved|<bot name>`).
             { "summon",        HandleBotSummon,     rbac::RBAC_PERM_JOIN_NORMAL_BG, Console::No },
@@ -691,8 +715,8 @@ public:
     // The caller's own race when it can be this class, else a random race of the caller's faction that can.
     static uint8 PickCompanionRace(Player const* owner, uint8 cls)
     {
-        // Legal on this realm, not merely present in the retail-derived PlayerInfo: a Human/Gnome/Undead owner has
-        // PlayerInfo for a hunter but no 1.12 hunter, and BotComposition::Roll refuses it.
+        // Legal on this realm, not merely present in the retail-derived PlayerInfo: a Gnome/Undead owner has
+        // PlayerInfo for a hunter but no Forever hunter, and BotComposition::Roll refuses it.
         using Playerbot::V2::BotComposition;
         if (BotComposition::IsLegalRaceClass(owner->GetRace(), cls))
             return owner->GetRace();
@@ -726,6 +750,28 @@ public:
     {
         handler->SendSysMessage("WoW Forever Bots by Karrz, based on agatho's PlayerbotV2 (GPL-2.0). .bot add <class> [tank|healer|dps], .bot call, .bot dismiss; all orders: BOT_COMMANDS.md");
         return true;
+    }
+
+    // .bot lfg [tank|healer|dps]: fill the group's missing tank / healer / damage places now with level-matched companions
+    // (the Group Finder does the same by itself when nobody joins a posted listing in time). The word is your own role.
+    static bool HandleBotLfg(ChatHandler* handler, Optional<std::string> ownRoleArg)
+    {
+        WorldSession* sess = handler->GetSession();
+        Player* me = sess ? sess->GetPlayer() : nullptr;
+        if (!me || !Playerbot::Services::Initialized())
+        { handler->SendSysMessage("`.bot lfg` is in-game only."); return Refuse(handler); }
+        Playerbot::Role own = Playerbot::Role::Unknown;
+        if (ownRoleArg)
+        {
+            bool ok = false;
+            own = ParseRoleWord(*ownRoleArg, ok);
+            if (!ok)
+            { handler->SendSysMessage("Usage: .bot lfg [tank|healer|dps] (your own role)"); return Refuse(handler); }
+        }
+        std::string msg;
+        bool const ok = Playerbot::V2::LfgFillNow(me, own, msg);
+        handler->SendSysMessage(msg.c_str());
+        return ok ? true : Refuse(handler);
     }
 
     // .bot add <class> [tank|healer|dps] [race] [male|female]
@@ -780,26 +826,37 @@ public:
             return Refuse(handler);
         }
 
+        std::string outMsg;
+        bool const ok = AddCompanionFor(me, sess, cls, role, race, gender, class_arg, outMsg);
+        handler->SendSysMessage(outMsg.c_str());
+        return ok ? true : Refuse(handler);
+    }
+
+    // Creates one companion of `cls` (race 0 = pick one) for `me` and logs it in; it joins the owner's group through the
+    // normal companion setup. Shared by `.bot add` and the Group Finder bot fill. `outMsg` is what the owner is told.
+    static bool AddCompanionFor(Player* me, WorldSession* sess, uint8 cls, Playerbot::Role role, uint8 race, uint8 gender,
+                                std::string const& className, std::string& outMsg)
+    {
         if (race && !Playerbot::V2::BotComposition::IsLegalRaceClass(race, cls))
-        { handler->PSendSysMessage("That race can't be a %s.", class_arg.c_str()); return Refuse(handler); }
+        { outMsg = "That race can't be a " + className + "."; return false; }
         if (race && Player::TeamForRace(race) != me->GetTeam())
-        { handler->SendSysMessage("That race is from the other faction, so it couldn't join your group."); return Refuse(handler); }
+        { outMsg = "That race is from the other faction, so it couldn't join your group."; return false; }
         if (!race)
             race = PickCompanionRace(me, cls);
         if (!race)
-        { handler->PSendSysMessage("No race of your faction can be a %s.", class_arg.c_str()); return Refuse(handler); }
+        { outMsg = "No race of your faction can be a " + className + "."; return false; }
 
         auto const pick = Playerbot::V2::BotComposition::Roll(race, cls, gender, "");
         if (pick.race == 0 || pick.name.empty())
         {
-            handler->PSendSysMessage("Bot add failed: couldn't roll a %s (race %u, no name or no legal race/class). See Playerbot.log '[BotComposition] Roll exhausted'.",
-                                     class_arg.c_str(), uint32(race));
-            return Refuse(handler);
+            outMsg = Trinity::StringFormat("Bot add failed: couldn't roll a {} (race {}, no name or no legal race/class). See Playerbot.log '[BotComposition] Roll exhausted'.",
+                                           className, uint32(race));
+            return false;
         }
 
         auto const created = Playerbot::V2::BotCharacterFactory::Create(sess, pick.name, race, cls, gender);
         if (!created.ok)
-        { handler->PSendSysMessage("Couldn't create the bot: %s", created.reason.c_str()); return Refuse(handler); }
+        { outMsg = "Couldn't create the bot: " + created.reason; return false; }
 
         Playerbot::BotId const id = created.guid.GetCounter();
         Playerbot::Services::Owners().SetOwner(id, sess->GetAccountId(), me->GetGUID().GetCounter());
@@ -807,11 +864,10 @@ public:
         auto const login = Playerbot::Services::SessionMgr().LoginBot(created.guid);
         if (!login.ok)
         {
-            handler->PSendSysMessage("Created %s but the login was refused (%s). Try `.bot call %s`.",
-                                     pick.name.c_str(), login.reason.c_str(), pick.name.c_str());
-            return Refuse(handler);
+            outMsg = Trinity::StringFormat("Created {} but the login was refused ({}). Try `.bot call {}`.", pick.name, login.reason, pick.name);
+            return false;
         }
-        handler->PSendSysMessage("%s is on the way.", pick.name.c_str());
+        outMsg = pick.name + " is on the way.";
         return true;
     }
 
@@ -942,7 +998,7 @@ public:
             ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(id);
             if (cap && !ObjectAccessor::FindConnectedPlayer(guid))
             {
-                if (out >= cap) { ++refused; continue; }
+                if (!inInstance && out >= cap) { ++refused; continue; }
                 ++out;
             }
             if (cap && inInstance && !(myGroup && myGroup->IsMember(guid)))
@@ -3728,7 +3784,7 @@ public:
     }
 
     // .playerbot spellaudit
-    // Read-only: writes SpellAudit.tsv to the logs folder, one line per legacy spell (id < 1,000,000) with the numbers this server holds for it:
+    // Read-only: writes SpellAudit.tsv to the logs folder, one line per legacy spell (id < 1,400,000: the client's own and Forever's 12xxxxx ids) with the numbers this server holds for it:
     // cast time, cooldowns, duration, range, proc chance and charges, stack, levels, and per effect the type, aura, base points, the vanilla
     // classic_spell_value mean when one applies, per level points, misc value, tick period, trigger spell, chain targets and radius.
     // tools/classic_spell_values/compare_spells.py compares the file with the VMaNGOS spell_template and writes the coverage report.
@@ -3740,9 +3796,16 @@ public:
         if (!out)
         { handler->PSendSysMessage("spellaudit: cannot write %s", path.c_str()); return false; }
         out << Sa::Header() << '\n';
+        // SpellAuditRules.tsv: what makes a spell castable and what it costs (power rows of every type, aura states, required auras, equipped
+        // item, stances, attributes, cooldown category) plus the attack power / spell power coefficients of each effect.
+        std::ofstream rules(sLog->GetLogsDir() + "SpellAuditRules.tsv", std::ios::trunc);
+        if (rules)
+            rules << "id\tname\tpowers_type:cost:optional:pct:required_aura\tcaster_aura_state\ttarget_aura_state\tcaster_aura_spell\ttarget_aura_spell\tcaster_aura_not\ttarget_aura_not"
+                     "\tequipped_class\tequipped_subclass_mask\tstances\tstances_not\tcategory\tcharge_category\tattr0\tattr1\tattr2\tattr3\tattr4\tattr5\tattr6\tattr7\tattr8"
+                     "\te1_bonus\te1_bonus_ap\te2_bonus\te2_bonus_ap\te3_bonus\te3_bonus_ap\n";
         LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
         uint32 written = 0;
-        for (uint32 id = 1; id < 1000000; ++id)
+        for (uint32 id = 1; id < 1400000; ++id)
         {
             SpellInfo const* info = sSpellMgr->GetSpellInfo(id, DIFFICULTY_NONE);
             if (!info)
@@ -3796,9 +3859,932 @@ public:
                 }
             }
             out << Sa::FormatLine(r) << '\n';
+            if (rules)
+            {
+                std::string powers;
+                for (SpellPowerEntry const* power : info->PowerCosts)
+                    if (power)
+                        powers += Trinity::StringFormat("{}{}:{}:{}:{:.1f}:{}", powers.empty() ? "" : ",", int32(power->PowerType), power->ManaCost, power->OptionalCost, power->PowerCostPct, power->RequiredAuraSpellID);
+                std::string name = r.name;
+                for (char& c : name)
+                    if (c == '\t' || c == '\n' || c == '\r')
+                        c = ' ';
+                std::string line = Trinity::StringFormat("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:#x}\t{:#x}\t{}\t{}", id, name, powers, info->CasterAuraState, info->TargetAuraState,
+                    info->CasterAuraSpell, info->TargetAuraSpell, info->ExcludeCasterAuraSpell, info->ExcludeTargetAuraSpell, info->EquippedItemClass,
+                    info->EquippedItemSubClassMask, info->Stances, info->StancesNot, info->CategoryId, info->ChargeCategoryId);
+                line += Trinity::StringFormat("\t{:#x}\t{:#x}\t{:#x}\t{:#x}\t{:#x}\t{:#x}\t{:#x}\t{:#x}\t{:#x}", info->Attributes, info->AttributesEx, info->AttributesEx2,
+                    info->AttributesEx3, info->AttributesEx4, info->AttributesEx5, info->AttributesEx6, info->AttributesEx7, info->AttributesEx8);
+                for (size_t i = 0; i < 3; ++i)
+                    line += i < effects.size() ? Trinity::StringFormat("\t{:.4f}\t{:.4f}", effects[i].BonusCoefficient, effects[i].BonusCoefficientFromAP) : std::string("\t0\t0");
+                rules << line << '\n';
+            }
             ++written;
         }
         handler->PSendSysMessage("spellaudit: %u spells written to %s", written, path.c_str());
+        return true;
+    }
+
+    // .playerbot spellcheck [@Player] [class id]
+    // Read-only, no cast. For every spell a class trainer teaches that is also a vanilla spell (Diagnostics/SpellCheckExpected.inc, generated from the VMaNGOS 1.12
+    // spell table by tools/classic_spell_values/gen_spellcheck_expected.py) the vanilla value formula is evaluated at the caster's level and compared with what the
+    // core computes for the same effect (SpellEffectInfo::CalcValue, which includes the classic_spell_value rows). One line per effect in SpellCheck.tsv of the logs
+    // folder: PASS, WRONG (amount differs), LAYOUT (the client builds the effect from another effect or aura, so the amounts are not comparable) or UNTESTED (the
+    // spell or effect is not in this server's spell store). The caster is the GM's own character, or the player named by "@Name" (from the console).
+    static bool HandleSpellCheck(ChatHandler* handler, Tail args)
+    {
+        namespace Sc = Playerbot::Diagnostics::SpellCheck;
+        Player* caster = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        uint32 onlyClass = 0;
+        for (std::string_view token : Trinity::Tokenize(std::string_view(args), ' ', false))
+        {
+            if (!token.empty() && token[0] == '@')
+            {
+                caster = ObjectAccessor::FindPlayerByName(token.substr(1));
+                continue;
+            }
+            if (Optional<uint32> id = Trinity::StringTo<uint32>(token))
+                onlyClass = *id;
+        }
+        if (!caster)
+        {
+            handler->PSendSysMessage("spellcheck: no player to use as the caster (give @Name from the console)");
+            return false;
+        }
+        std::string const path = sLog->GetLogsDir() + "SpellCheck.tsv";
+        std::ofstream out(path, std::ios::trunc);
+        if (!out)
+        { handler->PSendSysMessage("spellcheck: cannot write %s", path.c_str()); return false; }
+        out << "class\tspell\tname\teffect_index\teffect\taura\tverdict\texpected\tgot\tnote\n";
+        LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
+        int32 const casterLevel = caster->GetLevel();
+        uint32 pass = 0, wrong = 0, layout = 0, missing = 0;
+        for (Sc::Expected const& e : Sc::kExpected)
+        {
+            if (onlyClass && e.cls != onlyClass)
+                continue;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(e.spell, DIFFICULTY_NONE);
+            std::string verdict, note;
+            double expected = 0.0, got = 0.0;
+            if (!info || e.effectIndex >= info->GetEffects().size())
+            {
+                verdict = "UNTESTED";
+                note = "spell or effect not in this server's spell store";
+                ++missing;
+            }
+            else
+            {
+                SpellEffectInfo const& effect = info->GetEffect(SpellEffIndex(e.effectIndex));
+                expected = Sc::VanillaRange(e, casterLevel).mean;
+                if (uint32(effect.Effect) != uint32(e.effect) || uint32(effect.ApplyAuraName) != uint32(e.aura))
+                {
+                    verdict = "LAYOUT";
+                    note = Trinity::StringFormat("client effect {} aura {} against vanilla effect {} aura {}", uint32(effect.Effect), uint32(effect.ApplyAuraName), uint32(e.effect), uint32(e.aura));
+                    ++layout;
+                }
+                else
+                {
+                    // the die makes CalcValue random: the mean of many calls
+                    for (uint32 i = 0; i < 64; ++i)
+                        got += double(effect.CalcValue(caster));
+                    got /= 64.0;
+                    if (std::fabs(got - expected) <= std::max(1.5, 0.03 * std::fabs(expected)))
+                    {
+                        verdict = "PASS";
+                        ++pass;
+                    }
+                    else
+                    {
+                        verdict = "WRONG";
+                        ++wrong;
+                    }
+                }
+            }
+            std::string name = info && info->SpellName ? std::string((*info->SpellName)[locale]) : std::string();
+            for (char& c : name)
+                if (c == '\t' || c == '\n' || c == '\r')
+                    c = ' ';
+            out << Trinity::StringFormat("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2f}\t{:.2f}\t{}\n", uint32(e.cls), e.spell, name, uint32(e.effectIndex), uint32(e.effect), uint32(e.aura),
+                verdict, expected, got, note);
+        }
+        handler->PSendSysMessage("spellcheck: caster %s level %d: %u PASS, %u WRONG, %u LAYOUT, %u UNTESTED; lines in %s", caster->GetName().c_str(), casterLevel, pass, wrong, layout, missing, path.c_str());
+        return true;
+    }
+
+    // .playerbot talentwalk <Name> [<Name> ...]
+    // One talent walk (API::apply_classic_talents) for each named player in the world, timed: the milliseconds the world thread spends and the result. A bot
+    // whose walk is cached or held back by the duty cycle answers in 0 ms with Ok or Locked. 170 froze when about 60 bots logged in and each walk took seconds;
+    // run this from the console on freshly logged-in bots (.playerbot login) to see the cost without a client.
+    static bool HandleTalentWalk(ChatHandler* handler, Tail args)
+    {
+        uint32 walked = 0, total_ms = 0, worst_ms = 0;
+        for (std::string_view name : Trinity::Tokenize(std::string_view(args), ' ', false))
+        {
+            Player* p = ObjectAccessor::FindPlayerByName(name);
+            if (!p || !p->IsInWorld())
+            {
+                handler->PSendSysMessage("talentwalk: %s is not in the world", std::string(name).c_str());
+                continue;
+            }
+            uint32 const start = getMSTime();
+            Playerbot::Result const r = Playerbot::API(p).apply_classic_talents();
+            uint32 const ms = getMSTimeDiff(start, getMSTime());
+            ++walked;
+            total_ms += ms;
+            worst_ms = std::max(worst_ms, ms);
+            handler->PSendSysMessage("talentwalk: %s L%u result %u in %u ms", p->GetName().c_str(), uint32(p->GetLevel()), uint32(r), ms);
+        }
+        handler->PSendSysMessage("talentwalk: %u walked, %u ms in all, worst %u ms", walked, total_ms, worst_ms);
+        return walked > 0;
+    }
+
+    // .playerbot auracheck [@Player] [class id]
+    // For every aura effect of the vanilla spells a class trainer teaches whose amount is a plain number (stat, attack power, armor, crit and hit, speed, healing and
+    // damage done, absorb, periodic damage and heal), the caster gets the real aura on itself (Unit::AddAura: the aura effect's own CalculateAmount, with the
+    // caster's level), the amount of the effect is read and compared with the lowest and highest roll of the VMaNGOS value (SpellCheckExpected.h), and the aura is removed
+    // again in the same call, so no tick or expiry runs. Absorb, periodic damage and periodic heal amounts also carry spell and healing power: they only have to reach
+    // the vanilla minimum. Rows in AuraCheck.tsv of the logs folder: PASS, WRONG (amount outside the range, or no aura came up), LAYOUT (the client effect carries
+    // another aura type). Use a level 60 character without talents and with no spell power in the gear for clean numbers.
+    static bool HandleAuraCheck(ChatHandler* handler, Tail args)
+    {
+        namespace Sc = Playerbot::Diagnostics::SpellCheck;
+        Player* caster = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        uint32 onlyClass = 0;
+        for (std::string_view token : Trinity::Tokenize(std::string_view(args), ' ', false))
+        {
+            if (!token.empty() && token[0] == '@')
+            {
+                caster = ObjectAccessor::FindPlayerByName(token.substr(1));
+                continue;
+            }
+            if (Optional<uint32> id = Trinity::StringTo<uint32>(token))
+                onlyClass = *id;
+        }
+        if (!caster || !caster->IsInWorld())
+        {
+            handler->PSendSysMessage("auracheck: no player in the world to use as the caster (give @Name from the console)");
+            return false;
+        }
+        std::string const path = sLog->GetLogsDir() + "AuraCheck.tsv";
+        std::ofstream out(path, std::ios::trunc);
+        if (!out)
+        { handler->PSendSysMessage("auracheck: cannot write %s", path.c_str()); return false; }
+        out << "class\tspell\tname\teffect_index\taura\tverdict\tvanilla_min\tvanilla_max\tgot\tnote\n";
+        LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
+        int32 const casterLevel = caster->GetLevel();
+        uint32 pass = 0, wrong = 0, layout = 0, spells = 0;
+        uint32 lastSpell = 0;
+        Aura* aura = nullptr;
+        for (Sc::Expected const& e : Sc::kExpected)
+        {
+            if (onlyClass && e.cls != onlyClass)
+                continue;
+            switch (e.aura)
+            {
+                case 3: case 8: case 13: case 22: case 24: case 29: case 31: case 33: case 34: case 52: case 53: case 54: case 55: case 57: case 69: case 71:
+                case 79: case 85: case 87: case 99: case 101: case 107: case 108: case 124: case 134: case 135: case 136: case 137:
+                    break;
+                default:
+                    continue;
+            }
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(e.spell, DIFFICULTY_NONE);
+            if (e.spell != lastSpell)
+            {
+                if (lastSpell)
+                    caster->RemoveAurasDueToSpell(lastSpell);
+                lastSpell = e.spell;
+                aura = nullptr;
+                if (info)
+                {
+                    caster->RemoveAurasDueToSpell(e.spell);
+                    aura = caster->AddAura(e.spell, caster);
+                    ++spells;
+                }
+            }
+            std::string verdict, note;
+            Sc::Range const range = Sc::VanillaRange(e, casterLevel);
+            double const lo = std::min(range.lo, range.hi), hi = std::max(range.lo, range.hi);
+            double got = 0.0;
+            if (!info)
+            {
+                verdict = "LAYOUT";
+                note = "spell not in this server's spell store";
+                ++layout;
+            }
+            else if (!aura)
+            {
+                verdict = "WRONG";
+                note = "no aura came up on the caster (immune, restricted or removed by a script)";
+                ++wrong;
+            }
+            else if (AuraEffect const* effect = aura->GetEffect(e.effectIndex); !effect)
+            {
+                verdict = "LAYOUT";
+                note = "the client spell has no such aura effect";
+                ++layout;
+            }
+            else if (uint32(effect->GetAuraType()) != uint32(e.aura))
+            {
+                verdict = "LAYOUT";
+                note = Trinity::StringFormat("client aura {} against vanilla aura {}", uint32(effect->GetAuraType()), uint32(e.aura));
+                ++layout;
+            }
+            else
+            {
+                got = double(effect->GetAmount());
+                double const tolerance = std::max(1.0, 0.02 * std::fabs(range.mean));
+                bool const lowerBoundOnly = e.aura == 3 || e.aura == 8 || e.aura == 53 || e.aura == 69;
+                bool const ok = lowerBoundOnly ? got >= lo - tolerance : (got >= lo - tolerance && got <= hi + tolerance);
+                verdict = ok ? "PASS" : "WRONG";
+                if (lowerBoundOnly)
+                    note = "minimum only (spell power adds)";
+                if (ok)
+                    ++pass;
+                else
+                    ++wrong;
+            }
+            std::string name = info && info->SpellName ? std::string((*info->SpellName)[locale]) : std::string();
+            for (char& c : name)
+                if (c == '\t' || c == '\n' || c == '\r')
+                    c = ' ';
+            out << Trinity::StringFormat("{}\t{}\t{}\t{}\t{}\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{}\n", uint32(e.cls), e.spell, name, uint32(e.effectIndex), uint32(e.aura), verdict, lo, hi, got, note);
+        }
+        if (lastSpell)
+            caster->RemoveAurasDueToSpell(lastSpell);
+        handler->PSendSysMessage("auracheck: caster %s level %d, %u spells: %u PASS, %u WRONG, %u LAYOUT; lines in %s", caster->GetName().c_str(), casterLevel, spells, pass, wrong, layout, path.c_str());
+        return true;
+    }
+
+    // .playerbot traitcheck [@Player]
+    // Every learned spell that came from a trait node: its definition, rank, and for each effect the trait gives a curve for, the curve's value at
+    // that rank against what the spell effect (or the live aura) really has. Writes TraitCheck.tsv. A WRONG row is a rank the amounts do not follow.
+    static bool HandleTraitCheck(ChatHandler* handler, Tail args)
+    {
+        Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        for (std::string_view token : Trinity::Tokenize(std::string_view(args), ' ', false))
+            if (!token.empty() && token[0] == '@')
+                p = ObjectAccessor::FindPlayerByName(token.substr(1));
+        if (!p || !p->IsInWorld())
+        {
+            handler->PSendSysMessage("traitcheck: %s (give @Name from the console)", !p ? "no such online player" : "the player is not in the world");
+            return false;
+        }
+        std::string const path = sLog->GetLogsDir() + "TraitCheck.tsv";
+        std::ofstream out(path, std::ios::trunc);
+        if (!out)
+        { handler->PSendSysMessage("traitcheck: cannot write %s", path.c_str()); return false; }
+        out << "spell\tname\tdefinition\trank\teffect\tcurve\toperation\tcurve_value\tlive\tverdict\tnote\n";
+        LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
+        uint32 traitSpells = 0, rows = 0, ok = 0, wrong = 0;
+        // trait ranks the active config holds against the spells that carry them
+        uint32 configRanks = 0;
+        if (UF::TraitConfig const* cfg = p->GetTraitConfig(p->m_activePlayerData->ActiveCombatTraitConfigID))
+            for (UF::TraitEntry const& e : cfg->Entries)
+                if (e.Rank + e.GrantedRanks > 0)
+                    ++configRanks;
+        if (UF::TraitConfig const* cfg = p->GetTraitConfig(p->m_activePlayerData->ActiveCombatTraitConfigID))
+            for (UF::TraitEntry const& e : cfg->Entries)
+            {
+                if (e.Rank + e.GrantedRanks <= 0)
+                    continue;
+                TraitNodeEntryEntry const* nodeEntry = sTraitNodeEntryStore.LookupEntry(e.TraitNodeEntryID);
+                TraitDefinitionEntry const* definition = nodeEntry ? sTraitDefinitionStore.LookupEntry(nodeEntry->TraitDefinitionID) : nullptr;
+                if (!definition)
+                {
+                    out << Trinity::StringFormat("0\t\t0\t{}\t-\t-\t-\t0\t0\tUNLEARNED\tconfig entry {} has no trait definition\n", int32(e.Rank), e.TraitNodeEntryID);
+                    continue;
+                }
+                PlayerSpell const* learned = definition->SpellID ? Trinity::Containers::MapGetValuePtr(p->GetSpellMap(), uint32(definition->SpellID)) : nullptr;
+                if (!learned || !learned->Trait)
+                {
+                    SpellInfo const* di = definition->SpellID ? sSpellMgr->GetSpellInfo(definition->SpellID, DIFFICULTY_NONE) : nullptr;
+                    std::string dname = di && di->SpellName ? std::string((*di->SpellName)[locale]) : std::string();
+                    out << Trinity::StringFormat("{}\t{}\t{}\t{}\t-\t-\t-\t0\t0\tUNLEARNED\t{}\n", definition->SpellID, dname, nodeEntry->TraitDefinitionID, int32(e.Rank),
+                                                 !definition->SpellID ? "the trait definition grants no spell" : !learned ? "the spell is not in the character's spell map" : "the spell is known but carries no trait link");
+                }
+            }
+        for (auto const& [id, ps] : p->GetSpellMap())
+        {
+            if (ps.state == PLAYERSPELL_REMOVED || !ps.Trait)
+                continue;
+            ++traitSpells;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(id, DIFFICULTY_NONE);
+            std::vector<TraitDefinitionEffectPointsEntry const*> const* points = TraitMgr::GetTraitDefinitionEffectPointModifiers(ps.Trait->DefinitionId);
+            if (!info || !points)
+                continue;
+            std::string name = info->SpellName ? std::string((*info->SpellName)[locale]) : std::string();
+            for (char& c : name)
+                if (c == '\t' || c == '\n' || c == '\r')
+                    c = ' ';
+            Aura const* aura = p->GetAura(id);
+            for (TraitDefinitionEffectPointsEntry const* point : *points)
+            {
+                float const curve = sDB2Manager.GetCurveValueAt(point->CurveID, float(int32(ps.Trait->Rank)));
+                double live = 0.0;
+                std::string note;
+                if (aura && aura->GetEffect(uint8(point->EffectIndex)))
+                    live = aura->GetEffect(uint8(point->EffectIndex))->GetAmount();
+                else
+                {
+                    live = info->GetEffect(SpellEffIndex(point->EffectIndex)).CalcValue(p);
+                    note = aura ? "no aura effect at this index: spell effect value" : "no aura on the character: spell effect value";
+                }
+                std::string verdict;
+                if (point->GetOperationType() == TraitPointsOperationType::Set)
+                    verdict = std::fabs(live - curve) <= 0.51 ? "PASS" : "WRONG";
+                else
+                {
+                    verdict = "UNJUDGED";
+                    note += (note.empty() ? "" : "; ") + std::string("multiply or none: no base to compare");
+                }
+                ++rows;
+                if (verdict == "PASS")
+                    ++ok;
+                else if (verdict == "WRONG")
+                    ++wrong;
+                out << Trinity::StringFormat("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2f}\t{:.2f}\t{}\t{}\n", id, name, int32(ps.Trait->DefinitionId), int32(ps.Trait->Rank), int32(point->EffectIndex),
+                                             int32(point->CurveID), int32(point->OperationType), curve, live, verdict, note);
+            }
+        }
+        handler->PSendSysMessage("traitcheck: %s: %u trait-learned spells for %u config entries with ranks; %u curve rows: %u PASS, %u WRONG; lines in %s", p->GetName().c_str(), traitSpells, configRanks, rows, ok, wrong, path.c_str());
+        return true;
+    }
+
+    // .playerbot proccheck [@Player] [spell id...]
+    // Does a proc talent fire? For each proc spell (the ids given, or every spell of the character with a spell_proc row) the aura is put on the
+    // character and the proc row is tried against events built from the character's own spells: the static answer is
+    // SpellMgr::CanSpellTriggerProcOnEvent (does the row's family mask and school match any spell the class casts), the dynamic one is 200 events
+    // through Unit::ProcSkillsAndAuras, counting how often the triggered spell, a power gain or damage shows up. Writes ProcCheck.tsv.
+    static bool HandleProcCheck(ChatHandler* handler, Tail args)
+    {
+        Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        std::vector<uint32> ids;
+        for (std::string_view token : Trinity::Tokenize(std::string_view(args), ' ', false))
+        {
+            if (!token.empty() && token[0] == '@')
+            {
+                p = ObjectAccessor::FindPlayerByName(token.substr(1));
+                continue;
+            }
+            if (Optional<uint32> id = Trinity::StringTo<uint32>(token))
+                ids.push_back(*id);
+        }
+        if (!p || !p->IsInWorld() || !p->IsAlive())
+        {
+            handler->PSendSysMessage("proccheck: %s (give @Name from the console)", !p ? "no such online player: a name that is not logged in is not found" :
+                                     !p->IsInWorld() ? "the player is not in the world (loading, teleporting or logged out)" : "the player is dead or a ghost");
+            return false;
+        }
+        if (ids.empty())
+            for (auto const& [id, ps] : p->GetSpellMap())
+                if (ps.state != PLAYERSPELL_REMOVED && !ps.disabled)
+                    if (SpellInfo const* si = sSpellMgr->GetSpellInfo(id, DIFFICULTY_NONE))
+                        if (si->IsPassive() && sSpellMgr->GetSpellProcEntry(si))
+                            ids.push_back(id);
+        std::string error;
+        Creature* d = Playerbot::Diagnostics::Parity::SpawnProcDummy(p, 2.5f, error);   // in melee reach: a creature moved by NearTeleportTo only arrives at the next map update
+        if (!d)
+        {
+            handler->PSendSysMessage("proccheck: no dummy: %s", error.c_str());
+            return false;
+        }
+        std::string const path = sLog->GetLogsDir() + "ProcCheck.tsv";
+        std::ofstream out(path, std::ios::trunc);
+        if (!out)
+        {
+            d->DespawnOrUnsummon();
+            handler->PSendSysMessage("proccheck: cannot write %s", path.c_str());
+            return false;
+        }
+        out << "spell\tname\tverdict\tevent_spells\taccepted_by\tevents\tfired\texpected_chance\ttrigger\tnote\trow\n";
+        LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
+        constexpr int kEvents = 200;
+        uint32 pass = 0, bad = 0, other = 0;
+        for (uint32 id : ids)
+        {
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(id, DIFFICULTY_NONE);
+            std::string verdict, note;
+            std::string accepted, row;
+            uint32 candidateCount = 0, fired = 0, events = 0, trig = 0;
+            float expected = 0.f;
+            SpellProcEntry const* entry = info ? sSpellMgr->GetSpellProcEntry(info) : nullptr;
+            if (!info)
+                verdict = "NO_SPELL";
+            else if (!entry)
+            {
+                verdict = "NO_PROC_ROW";
+                row = Trinity::StringFormat("spell proc flags 0x{:x}/0x{:x}, passive {}, effects", uint32(info->ProcFlags[0]), uint32(info->ProcFlags[1]), info->IsPassive());
+                for (SpellEffectInfo const& e : info->GetEffects())
+                    if (e.IsEffect())
+                        row += Trinity::StringFormat(" [{}/{} trigger {}]", uint32(e.Effect), uint32(e.ApplyAuraName), e.TriggerSpell);
+            }
+            else
+            {
+                row = Trinity::StringFormat("flags 0x{:x}/0x{:x} family {} mask 0x{:x}/0x{:x}/0x{:x}/0x{:x} school 0x{:x} type 0x{:x} phase 0x{:x} hit 0x{:x} attr 0x{:x} chance {} ppm {} cd {} ms charges {}",
+                                            uint32(entry->ProcFlags[0]), uint32(entry->ProcFlags[1]), entry->SpellFamilyName, entry->SpellFamilyMask[0], entry->SpellFamilyMask[1],
+                                            entry->SpellFamilyMask[2], entry->SpellFamilyMask[3], entry->SchoolMask, uint32(entry->SpellTypeMask), uint32(entry->SpellPhaseMask),
+                                            uint32(entry->HitMask), uint32(entry->AttributesMask), entry->Chance, entry->ProcsPerMinute, entry->Cooldown.count(), entry->Charges);
+                bool const added = !p->HasAura(id);
+                if (added)
+                    p->AddAura(id, p);
+                if (!p->HasAura(id))
+                    verdict = "NO_AURA";
+                else
+                {
+                    for (SpellEffectInfo const& e : info->GetEffects())
+                        if (!trig && e.TriggerSpell)
+                            trig = e.TriggerSpell;
+                    // the amounts the aura really has on this character (a ranked talent's amounts come from its trait node, not the spell row)
+                    if (Optional<PlayerSpellTrait> trait = p->GetTraitInfoForSpell(id))
+                    {
+                        row += Trinity::StringFormat(" | trait definition {} rank {}", int32(trait->DefinitionId), int32(trait->Rank));
+                        if (std::vector<TraitDefinitionEffectPointsEntry const*> const* points = TraitMgr::GetTraitDefinitionEffectPointModifiers(trait->DefinitionId))
+                            for (TraitDefinitionEffectPointsEntry const* point : *points)
+                                row += Trinity::StringFormat(" curve{}:{}={}", int32(point->EffectIndex), int32(point->CurveID), sDB2Manager.GetCurveValueAt(point->CurveID, float(int32(trait->Rank))));
+                    }
+                    else
+                        row += " | no trait info for this spell (amounts are the spell row's)";
+                    if (Aura const* live = p->GetAura(id))
+                    {
+                        row += " | aura amounts";
+                        for (AuraEffect const* eff : live->GetAuraEffects())
+                            if (eff)
+                                row += Trinity::StringFormat(" e{}={}", uint32(eff->GetEffIndex()), eff->GetAmount());
+                    }
+                    expected = entry->Chance > 0.f ? entry->Chance : float(info->ProcChance);
+                    if (expected > 100.f)
+                        expected = 100.f;
+                    // the spells the class casts that this row's mask covers (one per spell family member, first rank), or one plain event
+                    std::vector<SpellInfo const*> candidates;
+                    if (entry->SpellFamilyName == 0 && !entry->SpellFamilyMask)
+                        candidates.push_back(nullptr);
+                    else
+                    {
+                        std::set<uint32> firstRanks;
+                        for (auto const& [sid, ps] : p->GetSpellMap())
+                        {
+                            if (ps.state == PLAYERSPELL_REMOVED || ps.disabled || candidates.size() >= 6)
+                                continue;
+                            SpellInfo const* si = sSpellMgr->GetSpellInfo(sid, DIFFICULTY_NONE);
+                            if (!si || si->IsPassive() || !si->IsAffected(entry->SpellFamilyName, entry->SpellFamilyMask))
+                                continue;
+                            if (firstRanks.insert(si->GetFirstRankSpell()->Id).second)
+                                candidates.push_back(si);
+                        }
+                    }
+                    candidateCount = uint32(candidates.size());
+                    bool const taken = bool(entry->ProcFlags & TAKEN_HIT_PROC_FLAG_MASK);
+                    ProcFlagsSpellType const spellType = entry->SpellTypeMask ? entry->SpellTypeMask : PROC_SPELL_TYPE_DAMAGE;
+                    ProcFlagsSpellPhase const phase = entry->SpellPhaseMask ? entry->SpellPhaseMask : PROC_SPELL_PHASE_HIT;
+                    ProcFlagsHit const hit = entry->HitMask ? entry->HitMask : (taken ? PROC_HIT_NORMAL : PROC_HIT_NORMAL);
+                    Unit* attacker = taken ? static_cast<Unit*>(d) : static_cast<Unit*>(p);
+                    Unit* victim = taken ? static_cast<Unit*>(p) : static_cast<Unit*>(d);
+                    SpellInfo const* usable = nullptr;
+                    for (SpellInfo const* si : candidates)
+                    {
+                        SpellSchoolMask const school = si ? si->GetSchoolMask() : (entry->SchoolMask ? SpellSchoolMask(entry->SchoolMask) : SPELL_SCHOOL_MASK_NORMAL);
+                        DamageInfo dmg(attacker, victim, 100, si, school, SPELL_DIRECT_DAMAGE, BASE_ATTACK);
+                        ProcEventInfo ev(attacker, victim, entry->ProcFlags, spellType, phase, hit, nullptr, &dmg, nullptr);
+                        if (sSpellMgr->CanSpellTriggerProcOnEvent(*entry, ev))
+                        {
+                            accepted += (accepted.empty() ? "" : ",") + (si ? std::to_string(si->Id) : std::string("melee"));
+                            if (!usable)
+                                usable = si;
+                        }
+                    }
+                    if (accepted.empty())
+                        verdict = "STATIC_REJECT";
+                    else if (!trig)
+                        verdict = "STATIC_OK";
+                    else
+                    {
+                        Powers const power = p->GetPowerType();
+                        for (int i = 0; i < kEvents; ++i)
+                        {
+                            p->RemoveAurasDueToSpell(id);
+                            p->AddAura(id, p);
+                            p->RemoveAurasDueToSpell(trig);
+                            d->RemoveAurasDueToSpell(trig);
+                            d->SetFullHealth();
+                            uint32 const hp = d->GetHealth();
+                            p->SetPower(power, 0);
+                            p->SetPower(POWER_COMBO_POINTS, 0);
+                            SpellSchoolMask const school = usable ? usable->GetSchoolMask() : (entry->SchoolMask ? SpellSchoolMask(entry->SchoolMask) : SPELL_SCHOOL_MASK_NORMAL);
+                            DamageInfo dmg(attacker, victim, 100, usable, school, SPELL_DIRECT_DAMAGE, BASE_ATTACK);
+                            Unit::ProcSkillsAndAuras(attacker, victim, taken ? ProcFlagsInit(PROC_FLAG_NONE) : entry->ProcFlags, taken ? entry->ProcFlags : ProcFlagsInit(PROC_FLAG_NONE),
+                                                     spellType, phase, hit, nullptr, &dmg, nullptr);
+                            ++events;
+                            if (p->HasAura(trig) || d->HasAura(trig) || d->GetHealth() < hp || p->GetPower(power) > 0 || p->GetPower(POWER_COMBO_POINTS) > 0)
+                                ++fired;
+                        }
+                        if (entry->ProcsPerMinute > 0.f)
+                        {
+                            verdict = fired ? "PASS" : "NO_FIRE";
+                            note = "procs per minute: rate not compared";
+                        }
+                        else
+                        {
+                            double const prob = expected / 100.0;
+                            double const sigma = std::sqrt(events * prob * (1.0 - prob));
+                            double const diff = std::fabs(double(fired) - events * prob);
+                            bool const ok = fired > 0 || prob < 0.02;
+                            // a strike or spell that triggered can still miss, dodge or parry against the level 63 dummy: a high chance proc may fall
+                            // short by up to 15 % without the proc being at fault
+                            bool const shortByMiss = prob >= 0.9 && double(fired) >= 0.85 * events * prob && double(fired) <= events * prob;
+                            verdict = !ok ? "NO_FIRE" : (diff > 4.0 * sigma + 2.0 && !shortByMiss ? "RATE_OFF" : "PASS");
+                            if (shortByMiss && diff > 4.0 * sigma + 2.0)
+                                note += (note.empty() ? "" : "; ") + std::string("fired less often than the chance: the triggered strike can miss, dodge or parry");
+                            if (entry->Cooldown.count())
+                                note = "internal cooldown reset per event";
+                        }
+                        // Injected events carry no Spell object, so a proc that reads the cast (a finisher's combo cost) can never fire from them:
+                        // cast the spell that the row accepted for real, ten times, five combo points and full power each time.
+                        if (verdict == "NO_FIRE" && usable)
+                        {
+                            uint32 casts = 0, signals = 0;
+                            int lastResult = -1;
+                            for (int i = 0; i < 10; ++i)
+                            {
+                                p->GetSpellHistory()->ResetAllCooldowns();
+                                // the row's internal cooldown (500 ms) would block back-to-back test casts made in one tick, and resetting it on the live aura
+                                // did not take effect: a freshly applied aura starts with no cooldown, as the injected-event loop above already relies on
+                                p->RemoveAurasDueToSpell(id);
+                                p->AddAura(id, p);
+                                p->GetSpellHistory()->CancelGlobalCooldown(usable);   // ResetAllCooldowns leaves the global cooldown: the second cast is NOT_READY (91)
+                                p->SetPower(power, p->GetMaxPower(power));
+                                p->SetPower(POWER_COMBO_POINTS, 5);
+                                p->RemoveAurasDueToSpell(trig);
+                                d->RemoveAurasDueToSpell(trig);
+                                p->SetFacingToObject(d);
+                                int32 const pointsBefore = p->GetPower(POWER_COMBO_POINTS);
+                                SpellCastResult const r = p->CastSpell(d, usable->Id, CastSpellExtraArgs(TRIGGERED_NONE));
+                                lastResult = int(r);
+                                note += Trinity::StringFormat("{}cast {}: result {}, points {} -> {}, talent aura {}, trigger aura on self {} / target {}, spell on target {}", note.empty() ? "" : "; ", i,
+                                    int(r), pointsBefore, p->GetPower(POWER_COMBO_POINTS), p->HasAura(id), p->HasAura(trig), d->HasAura(trig), d->HasAura(usable->Id));
+                                if (r == SPELL_CAST_OK)
+                                    ++casts;
+                                if (r == SPELL_CAST_OK && (p->GetPower(POWER_COMBO_POINTS) > 0 || p->HasAura(trig) || d->HasAura(trig)))
+                                    ++signals;   // a refused cast leaves the five points set and shows nothing
+                            }
+                            note += Trinity::StringFormat("{}real casts of {}: {} accepted, {} showed the effect, last result {}", note.empty() ? "" : "; ", usable->Id, casts, signals, lastResult);
+                            if (signals)
+                                verdict = "PASS";
+                        }
+                        if (Player const* rogue = p; rogue->GetClass() == CLASS_ROGUE)
+                            note += Trinity::StringFormat("{}off-hand weapon: {}", note.empty() ? "" : "; ", rogue->GetWeaponForAttack(OFF_ATTACK, true) ? "yes" : "NO");
+                    }
+                }
+                p->RemoveAurasDueToSpell(trig);
+                d->RemoveAurasDueToSpell(trig);
+                if (added)
+                    p->RemoveAurasDueToSpell(id);
+            }
+            if (verdict == "PASS" || verdict == "STATIC_OK")
+                ++pass;
+            else if (verdict == "NO_PROC_ROW" || verdict == "NO_SPELL" || verdict == "NO_AURA")
+                ++other;
+            else
+                ++bad;
+            std::string name = info && info->SpellName ? std::string((*info->SpellName)[locale]) : std::string();
+            for (char& c : name)
+                if (c == '\t' || c == '\n' || c == '\r')
+                    c = ' ';
+            out << Trinity::StringFormat("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1f}\t{}\t{}\t{}\n", id, name, verdict, candidateCount, accepted, events, fired, expected, trig, note, row);
+        }
+        d->DespawnOrUnsummon();
+        handler->PSendSysMessage("proccheck: %s, %zu spells: %u PASS/STATIC_OK, %u failing, %u not testable; lines in %s", p->GetName().c_str(), ids.size(), pass, bad, other, path.c_str());
+        return true;
+    }
+
+    // .playerbot learncheck [@Player]
+    // Read-only. `.learn my trainer` teaches every client SkillLineAbility spell of the class family (SpellLevel above 0, valid for the player),
+    // whether or not a trainer sells it. This lists the ones the player does not know, with whether any trainer row of the class teaches the spell,
+    // so spells that only that command gives (and bots never learn) stand out. Writes LearnCheck.tsv; nothing is learned.
+    static bool HandleLearnCheck(ChatHandler* handler, Tail args)
+    {
+        Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        for (std::string_view token : Trinity::Tokenize(std::string_view(args), ' ', false))
+            if (!token.empty() && token[0] == '@')
+                p = ObjectAccessor::FindPlayerByName(token.substr(1));
+        if (!p || !p->IsInWorld())
+        {
+            handler->PSendSysMessage("learncheck: give @Name of an online player");
+            return false;
+        }
+        ChrClassesEntry const* classEntry = sChrClassesStore.LookupEntry(p->GetClass());
+        if (!classEntry)
+            return false;
+        std::unordered_set<uint32> taught;
+        for (auto const& [trainerId, trainer] : sObjectMgr->GetTrainers())
+            if (trainer.GetClassMask() & p->GetClassMask())
+                for (Trainer::Spell const& ts : trainer.GetSpells())
+                    taught.insert(ts.SpellId);
+        std::string const path = sLog->GetLogsDir() + "LearnCheck.tsv";
+        std::ofstream out(path, std::ios::trunc);
+        if (!out)
+        {
+            handler->PSendSysMessage("learncheck: cannot write %s", path.c_str());
+            return false;
+        }
+        out << "spell\tname\tspell_level\tbase_level\tpassive\ttrainer_teaches\tknown\tskill_line\tgives_ranks_of\twhy_the_free_pass_skips_it\n";
+        LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
+        uint32 listed = 0, notTrainer = 0, alreadyKnown = 0;
+        std::unordered_set<uint32> seen;
+        for (SkillLineAbilityEntry const* entry : sSkillLineAbilityStore)
+        {
+            if (!entry || !seen.insert(entry->Spell).second)
+                continue;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(entry->Spell, DIFFICULTY_NONE);
+            if (!info || info->SpellLevel == 0 || info->SpellFamilyName != classEntry->SpellClassSet)
+                continue;
+            if (!p->IsSpellFitByClassAndRace(info->Id) || !SpellMgr::IsSpellValid(info, p, false))
+                continue;
+            bool const known = p->HasSpell(info->Id);
+            if (known)
+            {
+                ++alreadyKnown;
+                continue;
+            }
+            bool const byTrainer = taught.count(info->Id) != 0;
+            if (!byTrainer)
+                ++notTrainer;
+            ++listed;
+            std::string name = info->SpellName ? std::string((*info->SpellName)[locale]) : std::string();
+            for (char& c : name)
+                if (c == '\t' || c == '\n' || c == '\r')
+                    c = ' ';
+            std::string why;
+            if (byTrainer)
+                for (auto const& [trainerId, trainer] : sObjectMgr->GetTrainers())
+                    if (trainer.GetType() != Trainer::Type::Tradeskill && trainer.GetType() != Trainer::Type::Pet)
+                        for (Trainer::Spell const& ts : trainer.GetSpells())
+                            if (ts.SpellId == info->Id && why.empty())
+                                why = trainer.DescribeFreeTeachRefusal(p, info->Id);
+            out << Trinity::StringFormat("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", info->Id, name, info->SpellLevel, info->BaseLevel, info->IsPassive(), byTrainer,
+                known, entry->SkillLine, sSpellMgr->GetFirstSpellInChain(info->Id), why);
+        }
+        handler->PSendSysMessage("learncheck: %s (level %u): %u spells the .learn path would add, %u of them taught by no trainer row; %u already known; lines in %s",
+            p->GetName().c_str(), uint32(p->GetLevel()), listed, notTrainer, alreadyKnown, path.c_str());
+        return true;
+    }
+
+    // .playerbot casttest [@Player] <spell id> [<spell id>...]
+    // Casts each active spell once at a dummy in melee reach (full power, no cooldowns, 0 combo points) and writes CastTest.tsv with what changed:
+    // the cast result, the dummy's health, the caster's combo points, and every aura that appeared on either unit. A passive spell that carries spell
+    // modifiers (aura 107/108) is not cast: the modifier is read through Player::ApplySpellMod against every spell the player knows that it names.
+    // `>Name` names a friendly target (another online player) for positive spells that need one, such as a blessing; the dummy is used otherwise.
+    static bool HandleCastTest(ChatHandler* handler, Tail args)
+    {
+        Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        Player* friendTarget = nullptr;
+        bool friendNamed = false;
+        std::vector<uint32> ids;
+        for (std::string_view token : Trinity::Tokenize(std::string_view(args), ' ', false))
+        {
+            if (!token.empty() && token[0] == '@')
+            {
+                p = ObjectAccessor::FindPlayerByName(token.substr(1));
+                continue;
+            }
+            if (!token.empty() && token[0] == '>')
+            {
+                friendNamed = true;
+                friendTarget = ObjectAccessor::FindPlayerByName(token.substr(1));
+                continue;
+            }
+            if (Optional<uint32> id = Trinity::StringTo<uint32>(token))
+                ids.push_back(*id);
+        }
+        if (friendNamed && (!friendTarget || !friendTarget->IsInWorld() || !friendTarget->IsAlive()))
+        {
+            handler->PSendSysMessage("casttest: the friendly target after '>' is not an online living player");
+            return false;
+        }
+        if (!p || !p->IsInWorld() || !p->IsAlive() || ids.empty())
+        {
+            handler->PSendSysMessage("casttest: needs @Name of a living player in the world and at least one spell id");
+            return false;
+        }
+        // spells that name a party or raid member (a blessing, a heal) need the target in the caster's group: put the named player in it, no invitation
+        if (friendTarget && friendTarget != p && !(p->GetGroup() && p->GetGroup() == friendTarget->GetGroup()))
+        {
+            Group* group = p->GetGroup();
+            if (friendTarget->GetGroup() || friendTarget->GetGroupInvite() || (group && (group->IsFull() || !group->IsLeader(p->GetGUID()))))
+            {
+                handler->PSendSysMessage("casttest: %s is already in another group, or %s's group is full or not led by %s: leave it first", friendTarget->GetName().c_str(), p->GetName().c_str(), p->GetName().c_str());
+                return false;
+            }
+            if (!group)
+            {
+                group = new Group();
+                if (!group->Create(p))
+                {
+                    delete group;
+                    handler->PSendSysMessage("casttest: cannot create a group for %s", p->GetName().c_str());
+                    return false;
+                }
+                sGroupMgr->AddGroup(group);
+            }
+            if (!group->AddMember(friendTarget))
+            {
+                handler->PSendSysMessage("casttest: the group refused %s", friendTarget->GetName().c_str());
+                return false;
+            }
+            group->BroadcastGroupUpdate();
+        }
+        // a spell on another player needs line of sight and range: stand the friendly target beside the caster (same map only; the test's own placement)
+        std::string friendPlacement;
+        if (friendTarget && friendTarget != p && friendTarget->GetMap() == p->GetMap())
+        {
+            // The old fixed spot (2 yards east, same Z) can be inside a wall or below the floor, and a friend that is already close can still stand behind
+            // one: line of sight (result 71) is checked from the caster, so try four spots around the caster and keep the first one the caster can see.
+            auto const hasLos = [&]() { return friendTarget->GetDistance(p) <= 4.0f && p->IsWithinLOSInMap(friendTarget); };
+            for (uint32 attempt = 0; attempt < 4 && !hasLos(); ++attempt)
+            {
+                Position const spot = p->GetNearPosition(2.0f, attempt * float(M_PI) / 2.0f);
+                friendTarget->NearTeleportTo(spot.GetPositionX(), spot.GetPositionY(), spot.GetPositionZ(), p->GetOrientation());
+                // A bot's near teleport only lands when its session acks it, and the world tick does that later: casting now would still see the old
+                // position. Close the loop here, the way PlayerbotV2 does each tick.
+                if (friendTarget->GetTeleportState() == TeleportState::WaitingForTeleportAck && friendTarget->GetSession()
+                    && Playerbot::Services::SessionMgr().IsHeadless(friendTarget->GetGUID()))
+                {
+                    WorldPacket ack(CMSG_MOVE_TELEPORT_ACK, 8 + 4 + 4);
+                    ack << friendTarget->GetGUID();
+                    ack << int32(0);
+                    ack << int32(GameTime::GetGameTimeMS());
+                    WorldPackets::Movement::MoveTeleportAck ackPacket(std::move(ack));
+                    ackPacket.Read();
+                    friendTarget->GetSession()->HandleMoveTeleportAck(ackPacket);
+                }
+            }
+            friendPlacement = Trinity::StringFormat("friend at {:.1f} yd, line of sight {}, teleport state {}", friendTarget->GetDistance(p),
+                p->IsWithinLOSInMap(friendTarget) ? "yes" : "NO", int(friendTarget->GetTeleportState()));
+        }
+        std::string error;
+        Creature* d = Playerbot::Diagnostics::Parity::SpawnProcDummy(p, 2.5f, error);
+        if (!d)
+        {
+            handler->PSendSysMessage("casttest: no dummy: %s", error.c_str());
+            return false;
+        }
+        std::string const path = sLog->GetLogsDir() + "CastTest.tsv";
+        std::ofstream out(path, std::ios::trunc);
+        if (!out)
+        {
+            d->DespawnOrUnsummon();
+            handler->PSendSysMessage("casttest: cannot write %s", path.c_str());
+            return false;
+        }
+        out << "spell\tname\tresult\tdummy_health_delta\tcaster_health_delta\tcombo_before\tcombo_after\tnew_auras_on_caster\tnew_auras_on_dummy\tmodifiers\ttargets\n";
+        std::ofstream family(sLog->GetLogsDir() + "CastTestFamily.tsv", std::ios::trunc);
+        family << "passive\tfamily\tspell\tname\tclass_mask0\tclass_mask1\tclass_mask2\tclass_mask3\tknown\n";
+        LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
+        // a mounted caster fails every non-mount spell with SPELL_FAILED_NOT_MOUNTED (88): test from the ground
+        if (p->IsMounted())
+        {
+            p->Dismount();
+            p->RemoveAurasByType(SPELL_AURA_MOUNTED);
+        }
+        auto const auraIds = [](Unit const* u)
+        {
+            std::set<uint32> set;
+            for (auto const& [auraId, app] : u->GetAppliedAuras())
+                set.insert(auraId);
+            return set;
+        };
+        auto const describeNew = [&](std::set<uint32> const& before, std::set<uint32> const& after)
+        {
+            std::string text;
+            for (uint32 a : after)
+                if (!before.count(a))
+                {
+                    SpellInfo const* ai = sSpellMgr->GetSpellInfo(a, DIFFICULTY_NONE);
+                    text += Trinity::StringFormat("{}{} \"{}\"", text.empty() ? "" : ", ", a, ai && ai->SpellName ? (*ai->SpellName)[locale] : "?");
+                }
+            return text;
+        };
+        for (uint32 id : ids)
+        {
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(id, DIFFICULTY_NONE);
+            std::string name, result = "NO_SPELL", casterAuras, dummyAuras, mods;
+            int64 dummyDelta = 0, casterDelta = 0;
+            int32 comboBefore = 0, comboAfter = 0;
+            if (info)
+            {
+                name = info->SpellName ? std::string((*info->SpellName)[locale]) : std::string();
+                if (info->IsPassive())
+                {
+                    result = "PASSIVE";
+                    // a bot that does not have the talent would measure nothing: learn it for the measurement and drop it again afterwards
+                    bool const learnedForTest = !p->HasSpell(id) && !p->GetAura(id);
+                    if (learnedForTest)
+                    {
+                        p->LearnSpell(id, false);
+                        mods = "learned for the test; ";
+                    }
+                    // a modifier only applies through a live aura: say whether the player has it, and with what amount per effect
+                    if (Aura const* live = p->GetAura(id))
+                    {
+                        mods += "aura on the player:";
+                        for (AuraEffect const* eff : live->GetAuraEffects())
+                            mods += Trinity::StringFormat(" e{}={}", uint32(eff->GetEffIndex()), eff->GetAmount());
+                        mods += "; ";
+                    }
+                    else
+                        mods += Trinity::StringFormat("NO aura on the player (spell known: {}); ", p->HasSpell(id));
+                    for (SpellEffectInfo const& e : info->GetEffects())
+                    {
+                        if (e.ApplyAuraName != SPELL_AURA_ADD_FLAT_MODIFIER && e.ApplyAuraName != SPELL_AURA_ADD_PCT_MODIFIER)
+                            continue;
+                        SpellModOp const op = SpellModOp(e.MiscValue);
+                        uint32 inFamily = 0, named = 0;
+                        for (auto const& [knownId, ps] : p->GetSpellMap())
+                        {
+                            SpellInfo const* known = sSpellMgr->GetSpellInfo(knownId, DIFFICULTY_NONE);
+                            if (!known || known->IsPassive() || ps.state == PLAYERSPELL_REMOVED || known->SpellFamilyName != info->SpellFamilyName || !known->IsAffected(info->SpellFamilyName, e.SpellClassMask))
+                                continue;
+                            ++named;
+                            double value = e.ApplyAuraName == SPELL_AURA_ADD_PCT_MODIFIER ? 1.0 : 0.0;
+                            p->ApplySpellMod(known, op, value);
+                            mods += Trinity::StringFormat("{}op {} on {} \"{}\": {}", mods.empty() ? "" : ", ", int32(e.MiscValue), knownId,
+                                known->SpellName ? (*known->SpellName)[locale] : "?", value);
+                        }
+                        for (auto const& [knownId, ps] : p->GetSpellMap())
+                            if (SpellInfo const* known = sSpellMgr->GetSpellInfo(knownId, DIFFICULTY_NONE))
+                                if (!known->IsPassive() && ps.state != PLAYERSPELL_REMOVED && known->SpellFamilyName == info->SpellFamilyName)
+                                    ++inFamily;
+                        if (!named)
+                        {
+                            // every spell of that family the client data knows, with its class flags: the mask the talent names is compared against them by eye
+                            for (uint32 candidateId = 1; candidateId < 2000000; ++candidateId)
+                                if (SpellInfo const* candidate = sSpellMgr->GetSpellInfo(candidateId, DIFFICULTY_NONE))
+                                    if (candidate->SpellFamilyName == info->SpellFamilyName && !candidate->IsPassive() && candidate->SpellName && (*candidate->SpellName)[locale] && *(*candidate->SpellName)[locale])
+                                        family << id << '\t' << uint32(info->SpellFamilyName) << '\t' << candidateId << '\t' << (*candidate->SpellName)[locale] << '\t'
+                                            << candidate->SpellFamilyFlags[0] << '\t' << candidate->SpellFamilyFlags[1] << '\t' << candidate->SpellFamilyFlags[2] << '\t'
+                                            << candidate->SpellFamilyFlags[3] << '\t' << p->HasSpell(candidateId) << '\n';
+                            mods += Trinity::StringFormat("{}effect {} aura {} op {} mask {:#x}/{:#x}/{:#x}/{:#x} family {}: names none of the {} active spells of that family the player knows",
+                                mods.empty() ? "" : ", ", uint32(e.EffectIndex), uint32(e.ApplyAuraName), int32(e.MiscValue), e.SpellClassMask[0], e.SpellClassMask[1],
+                                e.SpellClassMask[2], e.SpellClassMask[3], uint32(info->SpellFamilyName), inFamily);
+                        }
+                    }
+                    if (learnedForTest)
+                        p->RemoveSpell(id, false, false);
+                }
+                else
+                {
+                    p->GetSpellHistory()->ResetAllCooldowns();
+                    p->GetSpellHistory()->CancelGlobalCooldown(info);
+                    if (Powers const pw = p->GetPowerType(); pw != POWER_COMBO_POINTS)
+                        p->SetPower(pw, p->GetMaxPower(pw));
+                    p->SetPower(POWER_COMBO_POINTS, 0);
+                    p->SetFacingToObject(d);
+                    std::set<uint32> const casterBefore = auraIds(p), dummyBefore = auraIds(d), friendBefore = friendTarget ? auraIds(friendTarget) : std::set<uint32>();
+                    int64 const dummyHp = d->GetHealth(), casterHp = p->GetHealth();
+                    comboBefore = p->GetPower(POWER_COMBO_POINTS);
+                    Unit* const target = friendTarget ? static_cast<Unit*>(friendTarget) :
+                        (info->IsPositive() && !info->NeedsExplicitUnitTarget() ? static_cast<Unit*>(p) : static_cast<Unit*>(d));
+                    SpellCastResult const r = p->CastSpell(target, id, CastSpellExtraArgs(TRIGGERED_NONE));
+                    result = Trinity::StringFormat("{}", int(r));
+                    comboAfter = p->GetPower(POWER_COMBO_POINTS);
+                    dummyDelta = int64(d->GetHealth()) - dummyHp;
+                    casterDelta = int64(p->GetHealth()) - casterHp;
+                    casterAuras = describeNew(casterBefore, auraIds(p));
+                    dummyAuras = describeNew(dummyBefore, auraIds(d));
+                    if (friendTarget && friendTarget != p)
+                    {
+                        std::string const friendAuras = describeNew(friendBefore, auraIds(friendTarget));
+                        casterAuras += Trinity::StringFormat("{}[on {}: {}; {}]", casterAuras.empty() ? "" : " ", friendTarget->GetName(), friendAuras.empty() ? "none" : friendAuras, friendPlacement);
+                        if (r == SPELL_CAST_OK && !friendAuras.empty() && d->IsAlive())
+                        {
+                            // measure what the aura does: a Shadow Bolt (686) hit of 200 from the dummy goes through the normal damage pipeline right now. A real
+                            // cast would only schedule the hit (projectile travel time), so the health read straight after it showed no change
+                            SpellInfo const* probe = sSpellMgr->GetSpellInfo(686, DIFFICULTY_NONE);
+                            int64 const friendHp = friendTarget->GetHealth(), casterHp2 = p->GetHealth();
+                            if (probe)
+                            {
+                                SpellNonMeleeDamage hit(d, friendTarget, probe, SpellCastVisual{}, probe->GetSchoolMask());
+                                d->CalculateSpellDamageTaken(&hit, 200, probe, BASE_ATTACK);
+                                d->DealSpellDamage(&hit, false);
+                            }
+                            mods += Trinity::StringFormat("dummy hit {} for 200 shadow: target health {}, caster health {}; ", friendTarget->GetName(),
+                                int64(friendTarget->GetHealth()) - friendHp, int64(p->GetHealth()) - casterHp2);
+                        }
+                    }
+                }
+            }
+            for (char& c : name)
+                if (c == '\t' || c == '\n' || c == '\r')
+                    c = ' ';
+            std::string targets;
+            if (info)
+                for (SpellEffectInfo const& e : info->GetEffects())
+                    if (e.IsEffect())
+                        targets += Trinity::StringFormat("{}e{} {}/{}", targets.empty() ? "" : ", ", uint32(e.EffectIndex), uint32(e.TargetA.GetTarget()), uint32(e.TargetB.GetTarget()));
+            if (friendTarget)
+                targets += Trinity::StringFormat("{}same group: {}", targets.empty() ? "" : "; ", p->GetGroup() && p->GetGroup() == friendTarget->GetGroup() ? "yes" : "NO");
+            out << Trinity::StringFormat("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", id, name, result, dummyDelta, casterDelta, comboBefore, comboAfter, casterAuras, dummyAuras, mods, targets);
+        }
+        d->DespawnOrUnsummon();
+        handler->PSendSysMessage("casttest: %s, %zu spells; lines in %s", p->GetName().c_str(), ids.size(), path.c_str());
         return true;
     }
 
@@ -4288,6 +5274,22 @@ public:
     //
     // Status sub-form prints whether bot logic is currently attached to self
     // without changing anything, useful for verifying the toggle.
+    // `.playerbot lazy`: one press casts the next spell of the warlock rotation on the target (the add-on's "Lazy lock" key runs this
+    // line as a secure macro, so it works in combat).
+    static bool HandleLazy(ChatHandler* handler)
+    {
+        WorldSession* sess = handler->GetSession();
+        if (!sess || !sess->GetPlayer())
+        {
+            handler->SendSysMessage("`.playerbot lazy` is in-game only (needs your character).");
+            return false;
+        }
+        std::string const msg = Playerbot::LazyLockPress(sess->GetPlayer());
+        if (!msg.empty())
+            handler->SendSysMessage(msg.c_str());
+        return true;
+    }
+
     static bool HandleSelf(ChatHandler* handler, std::string const& arg)
     {
         if (!Playerbot::Services::Initialized())
@@ -5050,6 +6052,12 @@ public:
             Playerbot::BotChatter::OnPlayerKilled(killer, killed);
     }
 };
+
+bool Playerbot::V2::AddCompanionForOwner(Player* owner, uint8 cls, Playerbot::Role role, std::string& msg)
+{
+    return playerbot_v2_commandscript::AddCompanionFor(owner, owner->GetSession(), cls, role, 0,
+                                                      uint8(urand(GENDER_MALE, GENDER_FEMALE)), "bot", msg);
+}
 
 void AddSC_playerbot_v2_commandscript()
 {

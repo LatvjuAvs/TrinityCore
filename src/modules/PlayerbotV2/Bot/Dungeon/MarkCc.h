@@ -195,10 +195,31 @@ bool TryCast(View const& s, Emit& emit, ObjectGuid target)
     // Out of reach: walk into it instead of standing out of range (Garr 2026-10-09: the banishers kept their formation slot 38-57 yd
     // from the Firesworn, 103 refusals, and the adds ran loose later). The stop point is a few yards inside the range on the line
     // from the mob.
+    // A mob on this caster comes first: a hard cast on another mob while it is being hit is the death of a mage (brd_roccor 127:
+    // Scnmage re-sheeped the Anvilrage Guardsman with a Bloodhound on it and died in the cast). The hold on the very mob hitting
+    // it is the answer to that one, and a trap at the feet goes out regardless.
+    if (!o->self_cast && u->victim != s.guid())
+        for (NearbyUnit const& a : s.raw().combat.attackers)
+            if (a.hp > 0 && a.guid != target && a.victim == s.guid())
+                return LogRefusal(low, now, s.name().c_str(), "a mob is on this caster", u->entry, TypeOf(*u), dist), false;
     if (dist > o->range)
     {
+        // Never past the tank toward the mob: the walk-in stops no closer to it than the tank stands, less a couple of yards
+        // (brd_roccor 127: the mage walked from 50 y to 27 y of a pack the tank was still 37 y from, stood in front of the pull
+        // and the pack ate it). With the tank further off than the spell reaches, the caster waits for the tank's pull spot.
+        float stop = std::max(o->range - 5.0f, 5.0f);
+        float tank_d = -1.0f;
+        for (NearbyUnit const& f : s.raw().combat.nearby_friends)
+        {
+            if (f.role != Role::Tank || f.hp <= 0) continue;
+            float const tx = u->x - f.x, ty = u->y - f.y, tz = u->z - f.z;
+            float const td = std::sqrt(tx * tx + ty * ty + tz * tz);
+            if (tank_d < 0.0f || td < tank_d) tank_d = td;
+        }
+        if (tank_d >= 0.0f && stop < tank_d - 2.0f) stop = tank_d - 2.0f;
+        if (stop > o->range)
+            return LogRefusal(low, now, s.name().c_str(), "out of range, the tank stands further off: waiting behind it", u->entry, TypeOf(*u), dist), false;
         LogRefusal(low, now, s.name().c_str(), "out of range, moving in", u->entry, TypeOf(*u), dist);
-        float const stop = std::max(o->range - 5.0f, 5.0f);
         float const f = stop / dist;   // fraction of the mob->bot line
         return emit.move_to(u->x + (p.x - u->x) * f, u->y + (p.y - u->y) * f, u->z + (p.z - u->z) * f, /*run=*/true);
     }

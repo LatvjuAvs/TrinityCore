@@ -5,6 +5,7 @@
 #include "Util/TaxiFare.h"
 #include "StateBase.h"
 #include "Bot/BotAI.h"
+#include "Diagnostics/DamageParity.h"
 #include "Bot/Formation.h"                      // StableJitter / MeleeArcSpot (SpreadOut)
 #include "Bot/BotSnapshotView.h"
 #include "Bot/BotIntentEmitter.h"
@@ -40,6 +41,12 @@
 #include "UnitDefines.h"                      // UNIT_NPC_FLAG_* (solo flee town-NPC pick)
 #include "SharedDefines.h"
 #include "Log.h"                                   // TC_LOG_INFO — TEMP AV push diag
+#include "Player.h"
+#include "ObjectAccessor.h"
+#include "Map.h"
+#include "ModelIgnoreFlags.h"
+#include <cstring>
+#include <span>
 #include <limits>
 #include <cmath>
 #include <algorithm>
@@ -332,8 +339,8 @@ bool MaybeUseOnUseTrinket(BotSnapshotView const& s, BotIntentEmitter& emit)
 {
     if (!s.in_combat() || s.victim().IsEmpty()) return false;
     if (s.is_casting()) return false;
-    const uint32 sid = s.ready_on_use_trinket();
-    if (sid == 0) return false;
+    const uint32 item = s.ready_on_use_trinket_item();
+    if (item == 0) return false;
     // PvP-aware gate: real players hoard the trinket for CC-break. If the
     // bot is fighting players (any attacker is a Player), only fire when
     // *actively* CC'd. The CC check walks own_auras for any harmful
@@ -368,8 +375,10 @@ bool MaybeUseOnUseTrinket(BotSnapshotView const& s, BotIntentEmitter& emit)
     // Most trinkets self-buff (ObjectGuid::Empty target); a few target enemy
     // (e.g. damage-dealing trinkets). cast() with no target lets Spell.cpp
     // pick implicit targets from the spell info.
-    emit.cast(sid);
-    return true;
+    // Not a spent tick: an item use is off the global cooldown, and a use the core refuses must not starve the rotation (217: every caster
+    // cast nothing while the use repeated each tick).
+    emit.use_item_by_entry(item);
+    return false;
 }
 
 // Race-appropriate offensive cooldown. Fired once per cooldown cycle while
@@ -663,7 +672,9 @@ ThreatHold EvaluateThreatHold(BotAI& ai, BotSnapshotView const& s, ObjectGuid ta
     if (target.IsEmpty()) return ThreatHold::None;
     ConfigReader const& cfg = Services::Config();
     if (!cfg.threat_hold_enabled() || s.in_battleground()) return ThreatHold::None;
-    if (!s.is_in_instance() && !cfg.threat_hold_open_world()) return ThreatHold::None;
+    // A raid group holds threat wherever it fights (a world boss, the support scorecard on open ground: on 230 the fury out-threatened the
+    // warrior tank in every run with no hold at all); open-world parties just fight.
+    if (!s.is_in_instance() && !s.in_raid_group() && !cfg.threat_hold_open_world()) return ThreatHold::None;
     if (ai.effective_role(s) == Role::Tank) return ThreatHold::None;
     // A boss fight script owns this bot's start and target (RaidFightScript.h): its start wait is the only hold.
     if (s.raw().raid_order.active && s.raw().raid_order.script_owns) return ThreatHold::None;
@@ -700,13 +711,17 @@ ThreatHold EvaluateThreatHold(BotAI& ai, BotSnapshotView const& s, ObjectGuid ta
     // A boss that cuts its tank's threat on a schedule (Onyxia's Knock Away, -25 %) is held at what stays of the tank's threat after a cut.
     float const threat_share = (boss && s.is_in_raid()) ? Raid::ThreatShareAfterDrop(s.map_id(), u->entry) : 1.0f;
     bool const melee_spec = IsMeleeSpec(s.cls(), s.spec());
-    float const base_ratio = std::min(s.is_in_raid() ? std::max(cfg.threat_max_ratio(), kRaidThreatMaxRatio) : cfg.threat_max_ratio(), threat_share);
+    // Raid discipline is the raid group's, wherever it fights: in the support scorecard (236) the open-world raid group fell to the party
+    // rule below, which drops the over-threat hold, and the fury and combat bots out-threatened the paladin tank from the pull (648 against
+    // 321 threat a second, the boss on the tank 0 of 120 s).
+    bool const raid_discipline = s.is_in_raid() || s.in_raid_group();
+    float const base_ratio = std::min(raid_discipline ? std::max(cfg.threat_max_ratio(), kRaidThreatMaxRatio) : cfg.threat_max_ratio(), threat_share);
     // Early in a raid pull the hold starts a typical hit short of the tank's threat (ThreatEarlyHoldRatio).
-    float const max_ratio = s.is_in_raid() ? ThreatEarlyHoldRatio(base_ratio, melee_spec, u->tank_threat, threat_share) : base_ratio;
+    float const max_ratio = raid_discipline ? ThreatEarlyHoldRatio(base_ratio, melee_spec, u->tank_threat, threat_share) : base_ratio;
     ThreatHold h = s.threat_hold(target, lead, max_ratio);
     // A 5-man party has one threat rule: the DPS wait for the owner's Attack, at most kPartyOpenWaitMs (6 s) from the tank's first hit (bounded below). The over-threat
     // hold and its release limits are raid discipline; in a party the tank holds with its own threat and the healer heals.
-    if (!s.is_in_raid() && h == ThreatHold::OverThreat)
+    if (!raid_discipline && h == ThreatHold::OverThreat)
         h = ThreatHold::None;
     // After the owner's Pull / Pull back the party's DPS wait for his Attack even once the tank has its lead. There is one timer:
     // kPartyOpenWaitMs below (6 s from the tank's first hit) lets them open by themselves. The Pull counts for the fight that
@@ -728,7 +743,7 @@ ThreatHold EvaluateThreatHold(BotAI& ai, BotSnapshotView const& s, ObjectGuid ta
     // keeps a tenth of margin under the 130 % a ranged attacker needs to take the mob.
     // The scheduled cut lowers both limits: a hold released at 100 % of a tank about to lose a quarter of it pulls the boss.
     // While one more hit would take the bot past the pull-safe ratio, the early ratio is also the release limit: the hold stays until the tank has built up.
-    const float hard_ratio = std::min({ ThreatHardRatio(melee_spec, s.is_in_raid(), u->tank_threat), threat_share,
+    const float hard_ratio = std::min({ ThreatHardRatio(melee_spec, raid_discipline, u->tank_threat), threat_share,
                                         max_ratio < base_ratio ? max_ratio : 1.0e9f });
     const bool past_hard_limit = u->tank_threat > 0.0f && u->my_threat >= u->tank_threat * hard_ratio;
     if (h == ThreatHold::OverThreat && !past_hard_limit && PartyOverThreatExpired(s, target))
@@ -750,7 +765,7 @@ ThreatHold EvaluateThreatHold(BotAI& ai, BotSnapshotView const& s, ObjectGuid ta
                 s.name(), u->entry, target.GetCounter(), u->tank_threat, kStalledTankHoldMs, u->my_threat);
         h = ThreatHold::None;
     }
-    if (h == ThreatHold::OverThreat && s.is_in_raid() &&
+    if (h == ThreatHold::OverThreat && raid_discipline &&
         RaidLogDue(RaidLogKey(s, RaidLogKind::ThreatHold), s.published_at_ms(), 5000u))
         TC_LOG_INFO("playerbot.v2",
             "[raid_threat] {} holds damage on entry {} ({}): over threat mine={:.0f} tank={:.0f}",
@@ -1269,17 +1284,12 @@ struct CombatIdleProbe
         uint32 const now = s.published_at_ms();
         bool const dps = s.is_alive() && ai.effective_role(s) == Role::Dps;
         bool const melee = IsMeleeSpec(s.cls(), s.spec());
-        // A melee bot swings without any emitted action: it is busy while its victim is in reach.
-        bool swinging = false;
-        if (melee)
-            if (NearbyUnit const* vi = s.victim_info(); vi && vi->hp > 0)
-            {
-                float bx, by, bz; s.position(bx, by, bz);
-                float const dx = vi->x - bx, dy = vi->y - by;
-                swinging = std::sqrt(dx * dx + dy * dy) <= 5.0f + vi->combat_reach;
-            }
-        bool const acting = !dps || emit.combat_action_count() != actions_before || s.is_casting() ||
-                            s.raw().cast.is_autorepeat || s.gcd_active() || swinging;
+        // A swing or an Auto Shot is an action no intent shows, and "victim in reach" or "auto-repeat flag set" is not proof it lands: the 225
+        // scorecard had arms, fury, ret and the hunters at 0 to 90 dps with both true and never idle. Damage the bot itself dealt in the last 4 s
+        // (a slow two-hander's swing interval fits) is what counts.
+        int32 const since_damage = int32(now - ai.last_damage_done_ms());
+        bool const landing = ai.last_damage_done_ms() != 0 && since_damage >= 0 && since_damage <= 4000;
+        bool const acting = !dps || emit.combat_action_count() != actions_before || s.is_casting() || s.gcd_active() || landing;
         if (acting)
         {
             st.idle_since_ms = 0;
@@ -1288,6 +1298,8 @@ struct CombatIdleProbe
         if (st.idle_since_ms == 0)
         {
             st.idle_since_ms = now ? now : 1u;
+            float bx, by, bz; s.position(bx, by, bz);
+            st.anchor_x = bx; st.anchor_y = by; st.anchor_ms = st.idle_since_ms;
             return;
         }
         uint32 const idle_ms = now - st.idle_since_ms;
@@ -1321,6 +1333,80 @@ struct CombatIdleProbe
             dist, u ? int(u->in_los) : 0, int(s.is_moving()), has_mana ? s.power_pct(0) : -1);
     }
 };
+
+// Idle watchdog ([idle_reposition]). A damage bot in combat with a victim that has started no cast, swing or Auto Shot for 3 s (the
+// [dps_idle_reason] probe's streak) and is not getting anywhere (still within 6 y of where the streak began, or where the watchdog last sent it)
+// goes to a spot that sees the victim and is in reach for its role: the melee ring for a melee bot, about 25 y out for a ranged one, on the
+// victim's level. The group scorecard (222) had six casters standing under the dummy without line of sight for the whole window.
+// Left alone: a deliberate hold (threat, tank wait, kill focus, marked crowd control, raid / BG orders), Stay / Hold, a bot that is out of mana,
+// and instances other than battlegrounds (the dungeon and raid positioning own the ground there).
+bool IdleWatchdog(BotAI& ai, BotSnapshotView const& s, BotIntentEmitter& emit)
+{
+    BotAI::CombatIdleState& st = ai.combat_idle();
+    uint32 const now = s.published_at_ms();
+    constexpr uint32 kIdleMs = 3000u;
+    constexpr float  kStuckYd = 6.0f;
+    if (st.idle_since_ms == 0 || now - st.idle_since_ms < kIdleMs || now - st.anchor_ms < kIdleMs)
+        return false;
+    if (!s.is_alive() || s.is_casting() || s.is_rooted() || s.is_stunned() || s.is_mounted() || s.victim().IsEmpty() ||
+        ai.effective_role(s) != Role::Dps || (s.is_in_instance() && !s.in_battleground()) || ai.holding_position(now))
+        return false;
+    if (char const* rule = ai.last_rule_fired())
+        for (char const* held : { "combat:threat", "combat:shield", "combat:pve_", "combat:marked_cc", "combat:tank_hold", "combat:bg_", "combat:raid_", "raid:", "combat:flee", "combat:disengage" })
+            if (std::strncmp(rule, held, std::strlen(held)) == 0)
+                return false;
+    NearbyUnit const* vu = s.victim_info();
+    if (!vu || vu->hp <= 0)
+        return false;
+    bool const melee = IsMeleeSpec(s.cls(), s.spec());
+    if (!melee && s.max_power(0) > 0 && s.power_pct(0) < 10)
+        return false;
+    float bx, by, bz; s.position(bx, by, bz);
+    float const ax = bx - st.anchor_x, ay = by - st.anchor_y;
+    if (ax * ax + ay * ay > kStuckYd * kStuckYd)
+    {
+        st.anchor_x = bx; st.anchor_y = by; st.anchor_ms = now;   // walking somewhere: look again in 3 s
+        return false;
+    }
+
+    Player* self = ObjectAccessor::FindConnectedPlayer(s.raw().guid);
+    Map* map = self ? self->GetMap() : nullptr;
+    if (!map)
+        return false;
+    float const dx = vu->x - bx, dy = vu->y - by, dz = vu->z - bz;
+    float const dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    char const* reason = !vu->in_los                                    ? "no line of sight" :
+                         melee && dist > 5.0f + vu->combat_reach        ? "not in melee range" :
+                         !melee && dist > 30.0f + vu->combat_reach      ? "out of range" :
+                                                                          "no rule acted";
+    // Candidate ring points from the bot's own bearing outwards in 15 degree steps: the first on the victim's level that sees it.
+    static constexpr float kRangedRadii[] = { 25.0f, 20.0f, 15.0f, 10.0f };
+    static constexpr float kMeleeRadii[]  = { 3.5f };
+    float const bearing = std::atan2(by - vu->y, bx - vu->x);
+    for (float const radius : melee ? std::span<float const>(kMeleeRadii) : std::span<float const>(kRangedRadii))
+        for (int k = 0; k < 24; ++k)
+        {
+            float const a = bearing + float((k + 1) / 2) * 0.2618f * (k % 2 ? 1.0f : -1.0f);
+            float const x = vu->x + std::cos(a) * radius, y = vu->y + std::sin(a) * radius;
+            float const z = map->GetHeight(self->GetPhaseShift(), x, y, vu->z + 2.0f, true, 6.0f);
+            if (z <= INVALID_HEIGHT + 1.0f || std::fabs(z - vu->z) > 2.5f)
+                continue;
+            if (!map->isInLineOfSight(self->GetPhaseShift(), x, y, z + 2.0f, vu->x, vu->y, vu->z + 2.0f, LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::M2))
+                continue;
+            if (!emit.move_to(x, y, z, /*run*/ true))
+                continue;
+            ai.note_move_commit(s.map_id(), x, y, z, now);
+            ai.set_last_rule_fired("combat:idle_reposition");
+            TC_LOG_INFO("playerbot.v2", "[idle_reposition] {} idle {:.1f}s ({}) victim {}/{} dist {:.1f} dz {:.1f} los {} -> {} spot ({:.1f},{:.1f},{:.1f}) {:.0f} y from the victim",
+                        s.name(), (now - st.idle_since_ms) / 1000.f, reason, vu->entry, s.victim().GetCounter(), dist, dz, int(vu->in_los), melee ? "melee ring" : "ranged ring", x, y, z, radius);
+            st.anchor_x = bx; st.anchor_y = by; st.anchor_ms = now;
+            return true;
+        }
+    st.anchor_ms = now;   // nothing found: try again in 3 s rather than every tick
+    TC_LOG_INFO("playerbot.v2", "[idle_reposition] {} idle {:.1f}s ({}) victim {}/{} dist {:.1f} dz {:.1f} los {}: no spot on the {} that sees the victim on its level",
+                s.name(), (now - st.idle_since_ms) / 1000.f, reason, vu->entry, s.victim().GetCounter(), dist, dz, int(vu->in_los), melee ? "melee ring" : "ranged ring");
+    return false;
+}
 
 // Combat re-facing (Playerbot.Behavior.ReFace). A swing needs the victim within +-60 degrees
 // (Unit::DoMeleeAttackIfReady -> BadFacing) and a facing cast within +-90; a bot has no client to
@@ -1369,12 +1455,12 @@ void ReFaceVictim(BotSnapshotView const& s, BotIntentEmitter& emit)
             // out at the usual pace; the core refuses a bot that really walks (Locked), and a walker gets the same request
             // again within a quarter second of stopping.
             if (moving && now - c.last_emit_ms < 500u) action = nullptr;
-            else if (moving && emit.face_victim(v)) { c.last_emit_ms = now; action = "refaced while moving (core decides)"; }
+            else if (moving && emit.face_victim(v)) { c.last_emit_ms = now; action = "face requested while moving (the core decides)"; }
             else if (moving)                  action = "skipped: emit refused while moving";
             else if (s.is_casting())          action = "skipped: casting";
             else if (s.is_stunned())          action = "skipped: controlled";
             else if (!just_stopped && now - c.last_emit_ms < 250u) action = nullptr;
-            else if (emit.face_victim(v)) { c.last_emit_ms = now; action = "refaced"; }
+            else if (emit.face_victim(v)) { c.last_emit_ms = now; action = "face requested (the core logs [face_locked] when it refuses)"; }
             else                              action = "skipped: emit refused";
         }
         if (action && off_deg > 60.0f && now - c.last_log_ms >= 2000u)
@@ -1689,7 +1775,17 @@ void DispatchInCombat(BotAI& ai,
 {
     // Reports a damage bot that ends this tick with nothing to do ([dps_idle_reason]).
     CombatIdleProbe const idle_probe{ ai, snapshot, emit, emit.combat_action_count(), ai.rule_fire_seq() };
+    if (IdleWatchdog(ai, snapshot, emit))
+        return;
     ReFaceVictim(snapshot, emit);
+    // The Stay left by a "use <object>" ends with the fight: the bot is in the group's combat now and must fight (UBRS 132f 22:25: a rogue
+    // pinned by the altar's Stay stood idle through the Emberseer fight).
+    if (ai.use_stay())
+    {
+        ai.clear_use_stay();
+        if (ai.holding_position(snapshot.published_at_ms()))
+            ai.exit_manual();
+    }
     ApPredicateContext ctx{ snapshot, group, ai.aoe_preference(), {} };
     // PvP context — populated for BG/arena ticks. Default-constructed is
     // PvE-mode (all false / empty); PvP-aware predicates gate on
@@ -1789,7 +1885,10 @@ void DispatchInCombat(BotAI& ai,
     // by the enemy-fighting-the-group scan: real fights have mobs whose
     // victim is a member (or the bot's pet). clear_ghost_combat drops the
     // PvE refs server-side, guarded there on an empty attacker list.
-    if (snapshot.victim().IsEmpty() &&
+    // A damage_parity leg is no ghost: the dummy never hits back, so the bot has no attackers by design, and dropping the combat refs
+    // made the dummy evade (auras gone, health reset) every ~15 s, the warlock measured 148 s idle of 180 (2026-10-20).
+    if (!Diagnostics::Parity::Active() &&
+        snapshot.victim().IsEmpty() &&
         snapshot.raw().combat.attackers.empty() &&
         !snapshot.is_casting() &&
         snapshot.combat_duration_ms() >= 10'000)
@@ -2035,7 +2134,7 @@ void DispatchInCombat(BotAI& ai,
                 // A target the owner ordered us onto (Attack / Engage) is never dropped for giving no XP: the order is the reason, and
                 // dropping it every tick restarted the rotation (damage_parity 2026-10-11: ~590 drops a leg, white swings and Overpower only).
                 const bool ordered = ai.is_manual_mode(now_ms) && ai.owner_command() == BotAI::OwnerCommand::Engage && ai.owner_target() == vg;
-                if ((vu->no_xp_kill || vu->is_pacified) && !quest_target && !fighting_us && !ordered)
+                if ((vu->no_xp_kill || vu->is_pacified) && !quest_target && !fighting_us && !ordered && !Diagnostics::Parity::IsDummy(vg))   // the damage_parity dummy gives no XP by design
                 {
                     emit.stop_attack();
                     ai.note_engage(vg, now_ms);   // 8s re-engage shield
@@ -2074,7 +2173,8 @@ void DispatchInCombat(BotAI& ai,
                 // pull pickers don't re-acquire it, letting the bot resume
                 // questing (which walks it out of range and breaks combat).
                 if (!snapshot.is_in_instance() && !group.exists() &&
-                    !quest_target && !vu->is_elite_or_rare && !(vu->is_dungeon_boss || vu->is_boss_rank))
+                    !quest_target && !vu->is_elite_or_rare && !(vu->is_dungeon_boss || vu->is_boss_rank) &&
+                    !Diagnostics::Parity::IsDummy(vg))   // the damage_parity dummy is unkillable by design
                 {
                     const int32 vmax = vu->max_hp > 0 ? vu->max_hp : 1;
                     // kStuckMs is a HARD time cap on a single NORMAL-mob fight.
@@ -2336,7 +2436,7 @@ void DispatchInCombat(BotAI& ai,
     // A ranged DPS / healer whose tank has moved it more than a few yards off its slot walks back to it, so the raid stays in shape
     // when the boss is pulled back or repositioned. A DPS bot with no victim is waiting for the Attack and stays put; a healer
     // (it has no victim of its own) holds its slot too, which lies 22 y / 17 y behind its anchor tank, inside heal range.
-    if (snapshot.is_in_raid() && !snapshot.in_battleground() && group.exists() &&
+    if ((snapshot.is_in_raid() || snapshot.in_raid_group()) && !snapshot.in_battleground() && group.exists() &&
         snapshot.raw().pve_order.cc_target.IsEmpty() &&   // a bot on crowd-control duty stands still to cast it
         (!snapshot.victim().IsEmpty() || ai.effective_role(snapshot) == Role::Healer) &&
         RaidFormationHold(snapshot, ai, group, emit))
@@ -2388,6 +2488,63 @@ void DispatchInCombat(BotAI& ai,
                     ai.set_last_rule_fired("combat:raid_range_close");
                     return;
                 }
+            }
+        }
+    }
+
+    // ---- 5-man tank out of its healer's sight ----
+    // The healer stands within its 30 y leash but a floor apart from the tank (a balcony, the top of a stair) with no sight line:
+    // every heal fails LINE_OF_SIGHT and the healer's own sight step finds no path up (SFK 2026-10-20 run 4: Scnwarrior fought two
+    // Bleak Worgs 9 y above Scnpriest for 42 s, 60 heals refused, and died with the healer at full mana). After kTankSightLostMs
+    // the tank brings the fight to the healer: a walkable step toward the healer's spot each tick (the mobs follow) until a healer
+    // sees it again, for at most kTankSightWalkMs. A same-floor sight problem (a pillar, a corner) stays the healer's to solve.
+    if (!snapshot.in_battleground() && snapshot.is_in_dungeon() && !snapshot.is_in_raid() &&
+        ai.effective_role(snapshot) == Role::Tank && snapshot.is_alive() && group.exists() &&
+        Services::Config().behavior_dungeon_flow())
+    {
+        constexpr uint32 kTankSightLostMs = 4000;
+        constexpr uint32 kTankSightWalkMs = 15000;
+        constexpr float kHealerSightLeashYd = 30.0f;   // BotSnapshotView::beyond_healer_leash
+        constexpr float kHealerFloorDz = 4.0f;         // kRaidSlotMaxTankDz: a stand point on the tank's floor lies within this
+        constexpr float kTankSightStepYd = 20.0f;
+        float bx, by, bz;
+        snapshot.position(bx, by, bz);
+        NearbyUnit const* blind = nullptr;   // the nearest healer that cannot see the tank from another floor
+        bool a_healer_sees = false;
+        float blind_d2 = kHealerSightLeashYd * kHealerSightLeashYd;
+        for (auto const& f : snapshot.raw().combat.nearby_friends)
+        {
+            if (f.role != Role::Healer || f.hp <= 0 || f.guid == snapshot.raw().guid) continue;
+            const float hx = f.x - bx, hy = f.y - by, d2 = hx * hx + hy * hy;
+            if (d2 > kHealerSightLeashYd * kHealerSightLeashYd) continue;
+            if (f.in_los || std::fabs(f.z - bz) <= kHealerFloorDz) { a_healer_sees = true; break; }
+            if (d2 < blind_d2) { blind_d2 = d2; blind = &f; }
+        }
+        const uint32 sight_now_ms = snapshot.published_at_ms();
+        const uint32 lost_ms = ai.healer_sight_lost_ms(blind && !a_healer_sees, sight_now_ms);
+        if (blind && !a_healer_sees && lost_ms >= kTankSightLostMs && lost_ms <= kTankSightLostMs + kTankSightWalkMs &&
+            !snapshot.is_casting())
+        {
+            float sx, sy, sz;
+            bool off = false;
+            const bool stepped = DungeonStepTowardTank(snapshot.raw().guid, blind->x, blind->y, blind->z, kTankSightStepYd, sx, sy, sz, off) &&
+                                 !RaidStandPointBlocked(snapshot, sx, sy, sz);
+            if (RaidLogDue(RaidLogKey(snapshot, RaidLogKind::ThreatHold) ^ 0x73696768u, sight_now_ms, 5000u))
+            {
+                if (stepped)
+                    TC_LOG_INFO("playerbot.v2",
+                                "[tank_sight] {} brings the fight back to its healer: {:.0f} y {} it, no sight line for {} s -> ({:.1f},{:.1f},{:.1f})",
+                                snapshot.name(), std::fabs(blind->z - bz), blind->z < bz ? "below" : "above", lost_ms / 1000u, sx, sy, sz);
+                else
+                    TC_LOG_INFO("playerbot.v2", "[tank_sight] {} cannot step toward its healer ({:.0f} y {} it, no sight line for {} s): no walkable step",
+                                snapshot.name(), std::fabs(blind->z - bz), blind->z < bz ? "below" : "above", lost_ms / 1000u);
+            }
+            if (stepped)
+            {
+                if (!emit.move_already_emitted(sx, sy, sz))
+                    emit.move_to(sx, sy, sz, /*run*/ true);
+                ai.set_last_rule_fired("combat:tank_to_healer_sight");
+                return;
             }
         }
     }
@@ -2854,6 +3011,7 @@ void DispatchInCombat(BotAI& ai,
                 continue;
             emit.use_game_object(o.guid);
             ai.note_action_retry(BotAI::ActionKind::BgUseGo, go_low, bg_now_ms);
+            ai.note_action_retry(BotAI::ActionKind::BgFormHold, 0, bg_now_ms);
             ai.set_last_rule_fired("combat:bg_grab_dropped_flag");
             return;
         }
@@ -3480,7 +3638,7 @@ void DispatchInCombat(BotAI& ai,
     // A raid healer never walks into melee: its job is range, whatever its
     // spec table says (a resto druid or holy paladin flagged melee by spec).
     // Playerbot.Behavior.DungeonFlow: a 5-man healer keeps range and waits for the next heal too ([dungeon_flow]).
-    const bool raid_healer = (snapshot.is_in_raid() ||
+    const bool raid_healer = (snapshot.is_in_raid() || snapshot.in_raid_group() ||
                               (snapshot.is_in_dungeon() && Services::Config().behavior_dungeon_flow() &&
                                group.exists() && group.tank() != nullptr)) &&
                              !snapshot.in_battleground() &&
@@ -3516,7 +3674,7 @@ void DispatchInCombat(BotAI& ai,
             // we close distance. Past the cap → drop the chase to free the
             // bot from terrain-induced infinite gap-close loops.
             if (chase_blocked)
-                ai.set_last_rule_fired("combat:melee_hold_hazard");
+                ai.set_last_rule_fired(HeldByOwner(ai, snapshot) ? "combat:melee_hold_stay" : "combat:melee_hold_hazard");
             else if (d2 > kMeleeRange * kMeleeRange && vu->is_fleeing && snapshot.is_in_dungeon() && d2 > kFleeLeashYd * kFleeLeashYd)
             {
                 // A mob running for help is not chased (Deadmines 2026-10-13: the tank followed a fleeing Miner into the next
@@ -3603,8 +3761,20 @@ void DispatchInCombat(BotAI& ai,
                 // SpreadOut settle: in reach but piled on the victim - a raid / elite fight with the mob
                 // busy on someone else - slide to this bot's own spot, only when > 2 y from it, at most
                 // every 3 s, never while casting, rooted or already walking.
-                if (Services::Config().behavior_spread_out() &&
-                    snapshot.is_in_raid() &&
+                // Not only in raids: a melee bot that arrived from the front of a mob facing someone else (or nobody, a dummy) stood there and ate
+                // the front-only parries (damage_parity 143: bot_in_front_of_dummy, 14% parry). Outside a raid it slides only while it is in front
+                // of the mob: once behind, it stays put (no walking, no lost swings) until the mob turns.
+                bool in_front_of_victim = true;
+                if (!snapshot.is_in_raid())
+                {
+                    float fx, fy, fz;
+                    snapshot.position(fx, fy, fz);
+                    float diff = std::atan2(fy - vu->y, fx - vu->x) - vu->o;
+                    while (diff > float(M_PI)) diff -= 2.0f * float(M_PI);
+                    while (diff < -float(M_PI)) diff += 2.0f * float(M_PI);
+                    in_front_of_victim = std::fabs(diff) < 0.5f * float(M_PI);
+                }
+                if (Services::Config().behavior_spread_out() && in_front_of_victim &&
                     vu->victim != snapshot.guid() && ai.effective_role(snapshot) != Role::Tank &&
                     !snapshot.is_rooted() && !snapshot.is_casting() && !snapshot.has_path_destination() &&
                     !ai.action_recently_tried(BotAI::ActionKind::RaidSpacing, 0, snapshot.published_at_ms()))
@@ -3788,9 +3958,8 @@ void DispatchInCombat(BotAI& ai,
     // While a hard cast is in flight on the bot, every additional cast intent
     // we emit gets rejected with SPELL_FAILED_SPELL_IN_PROGRESS by the engine
     // (Spell.cpp:3461). Skip APL evaluation entirely until the cast resolves.
-    // We accept the small efficiency loss during the LAUNCHED window (where
-    // new casts would actually be valid) in exchange for not flooding the
-    // intent queue with rejected casts on every 250ms tick.
+    // The snapshot does not count the LAUNCHED window (cast time over, projectile in flight) as casting, so the
+    // next cast goes out then, as the core accepts it.
     if (CancelOverheal(ai, snapshot, group, emit)) return;
     if (snapshot.is_casting()) return;
 
@@ -3887,6 +4056,21 @@ void DispatchInCombat(BotAI& ai,
                     emit.cancel_aura(25780);
                 break;
             case CLASS_DRUID:   rotation_spec = 103; break;
+            default: break;
+        }
+    }
+    // A bot with no group (an ambient world bot grinding) plays its class's damage rotation whatever role it rolled for dungeon
+    // fills: a tank or healer rotation kills slowly alone. Talents and gear are untouched; grouped bots keep their role.
+    if (!group.exists() && rotation_spec &&
+        (IsTankSpec(snapshot.cls(), uint16(rotation_spec)) || IsHealerSpec(snapshot.cls(), uint16(rotation_spec))))
+    {
+        switch (snapshot.cls())
+        {
+            case CLASS_WARRIOR: rotation_spec = 71;  break;
+            case CLASS_PALADIN: rotation_spec = 70;  break;
+            case CLASS_DRUID:   rotation_spec = IsHealerSpec(CLASS_DRUID, uint16(rotation_spec)) ? 102u : 103u; break;
+            case CLASS_PRIEST:  rotation_spec = 258; break;
+            case CLASS_SHAMAN:  rotation_spec = 262; break;
             default: break;
         }
     }

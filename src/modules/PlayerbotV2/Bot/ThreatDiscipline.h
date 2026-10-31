@@ -72,13 +72,13 @@ inline uint64 RaidLogKey(BotSnapshotView const& s, RaidLogKind k)
 }
 
 // Threat discipline applies here: enabled, not a battleground, inside an
-// instance (or the open world when configured), and the group has a tank.
+// instance or in a raid group (or the open world when configured), and the group has a tank.
 inline bool ThreatDisciplineApplies(BotSnapshotView const& s)
 {
     if (!Services::Initialized()) return false;
     ConfigReader const& cfg = Services::Config();
     if (!cfg.threat_hold_enabled() || s.in_battleground()) return false;
-    if (!s.is_in_instance() && !cfg.threat_hold_open_world()) return false;
+    if (!s.is_in_instance() && !s.in_raid_group() && !cfg.threat_hold_open_world()) return false;
     return !s.group_tank().IsEmpty();
 }
 

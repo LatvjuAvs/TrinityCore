@@ -58,6 +58,7 @@ The `.bot` commands for your own bots work for every account, no GM needed; each
 | Command | What it does |
 |---|---|
 | `.bot add <class> [tank\|healer\|dps] [race] [male\|female]` | Creates a companion bound to you, levels it to you, teaches spells, sets role/talents/gear, brings it over and groups it. The role is kept across relog and `.bot call`. |
+| `.bot lfg [tank\|healer\|dps]` | Fills the missing tank / healer / damage places of your group (1 tank, 1 healer, 3 damage) with level-matched companions, now. The word is your own role. The Group Finder does the same on its own: post a dungeon listing and, if nobody joins within `Playerbot.Lfg.BotFillSeconds` (default 180), the missing roles are filled. |
 | `.bot call <name\|all>` | Brings back a companion (logs it in, joins your group). `all` = your saved roster plus every bot in your group. |
 | `.bot summon <name\|all\|saved>` | Every player, own bots only: `.bot summon all` brings only the bots that are in your group right now (it never logs anyone in), `.bot summon saved` your saved roster plus the grouped bots (logging them in), `.bot summon <name>` one of your companions. Any other name: "You can only summon your own bots". The GM `.summon` (other players) is unchanged and stays GM-only. |
 | `.bot save <name\|all>` | Puts a companion (or every bot with you) on your roster. |

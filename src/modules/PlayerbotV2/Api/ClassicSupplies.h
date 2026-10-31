@@ -81,7 +81,7 @@ TC_GAME_API bool LearnableGroupBuff(uint32 spell, uint8 level);
 // The restock tops the bags up to AMMO_TARGET (several stacks) once the stock is under
 // AMMO_LOW_PERCENT of it.
 constexpr uint32 AMMO_TARGET = 1000;
-constexpr uint32 AMMO_LOW_PERCENT = 30;
+constexpr uint32 AMMO_LOW_PERCENT = 60;
 constexpr uint32 AmmoLowBelow() { return AMMO_TARGET * AMMO_LOW_PERCENT / 100; }
 
 // Best projectile of `kind` a bot of `level` can use (required level <= level, highest

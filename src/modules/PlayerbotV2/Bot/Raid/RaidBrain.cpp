@@ -798,6 +798,7 @@ bool Clearest(Player* bot, std::vector<Player*> const& others, float wanted, Rai
 struct Sticky { float x, y, z; uint32_t at; char const* reason; };
 std::unordered_map<uint64_t, Sticky> g_sticky;
 std::unordered_map<uint64_t, uint32_t> g_lastSpread;
+std::unordered_map<uint64_t, uint32_t> g_lastSpreadLog;
 std::unordered_map<uint64_t, uint32_t> g_lastTankFace;
 std::unordered_map<uint64_t, uint32_t> g_lastFaceAway;
 std::unordered_map<uint64_t, uint32_t> g_lastRearStep;
@@ -1749,6 +1750,16 @@ void DecideMove(Plan const& plan, Member const& self, uint32_t now, std::vector<
                     if (now - at < 4000)
                         continue;
                     if (Clearest(bot, others, rule.radius, out, "spread", circles, /*urgent*/ false)) { at = now; Remember(bot, out, now); return; }
+                    // No spot: say why, once per bot every 10 s (zg_venoxis 2026-10-20 124: ten casters within 3 y of each other under a
+                    // 12 y spread, Holy Wrath 4-57k through all of them, and nothing in the log said what the spread had tried).
+                    uint32_t& logged = g_lastSpreadLog[bot->GetGUID().GetCounter()];
+                    if (now - logged >= 10000)
+                    {
+                        logged = now;
+                        TC_LOG_INFO("playerbot.v2.raid", "[raid_spread] {} wants {:.0f} y from the raid at {} and has {:.1f}: no spot ({}; "
+                                    "routine probes {}/{})", bot->GetName(), rule.radius, enemy->GetName(), nearest, g_clearestWhy,
+                                    g_pathProbes, kPathProbeRoutine);
+                    }
                 }
 
     // 3b. Face away (Magmadar): the tank that holds the enemy stands on the far side of it from the raid, so the enemy's back is

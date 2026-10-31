@@ -147,6 +147,8 @@ Playerbot.World.ActivityRadius = 300
 # zone. Bots are placed at quest hubs within ActivityRadius, so a bigger radius spreads a zone crowd over the zone.
 Playerbot.World.CityBots = 0
 Playerbot.World.ZoneBots = 0
+# The same in a start zone (Mulgore, Durotar, Elwynn, ...): one valley and one camp, so no more than this many world bots there (0 = ZoneBots).
+Playerbot.World.StartZoneBots = 50
 
 # Spawn rate (bots per spawner tick) while the player is in a capital; 0 = SpawnPerTick. Fills a city faster.
 Playerbot.World.CitySpawnPerTick = 0
@@ -227,6 +229,24 @@ Playerbot.World.NaturalMoves = 1
 # call LFG for a dungeon of their level. No bot is created for it and a bot joins a dungeon only when a real player invites it. 0 = off.
 Playerbot.World.TownLife = 1
 
+# Questing of the world's bots. 0 (default): they do not pick up or do quests on their own; they level by killing the mobs of their level
+# (walking to where such mobs stand when none is near), stand around inns and flight masters, duel and chat. Companions (bots grouped
+# with a player) still quest with him: they accept the quests he shares, do the objectives beside him and hand in with him.
+# 1: the old behaviour, world bots walk to quest hubs, take quests and do them.
+Playerbot.World.Questing = 0
+# Gate duels: while a real player stands within Radius yards of a capital's gate (Stormwind, Ironforge, Darnassus, Orgrimmar, Thunder
+# Bluff, Undercity), up to PairsPerGate pairs of same-faction world bots of about one level duel on the road outside it, with a few
+# onlookers. They use the game's own duel request, so the duel flag and rules apply; after a duel the pair sits out and others take
+# over. The gate is found from the navmesh as the first point outside the city on the road to the next town ("[gate_duel] <city> gate
+# found" in the log). With the keys on, an idle world bot within 10 levels accepts a real player's duel request, and now and then an
+# idle bot near a gate asks a player of about its level for one (ChallengePlayers), each player at most once per ChallengeCooldownSec.
+# Enable = 0 switches all of it off (a player's duel request is then answered as before: about one time in three within 5 levels).
+Playerbot.World.GateDuels.Enable = 1
+Playerbot.World.GateDuels.PairsPerGate = 2
+Playerbot.World.GateDuels.Radius = 80
+Playerbot.World.GateDuels.ChallengePlayers = 1
+Playerbot.World.GateDuels.ChallengeCooldownSec = 600
+
 # How many other players may stand within 40 yards of a world bot working a quest objective before it gives that objective up for 15
 # minutes and takes another quest (real players and their companions keep their place first, then world bots by id). Keeps a popular mob
 # camp from drawing a dozen bots. 0 = off.
@@ -249,6 +269,8 @@ Playerbot.World.JumpGraceSec = 20
 # next to the nearest player (0 = no cap). Outdoors and in a capital.
 Playerbot.World.AreaCapOutdoors = 14
 Playerbot.World.AreaCapTown = 40
+# The same in a start zone (Camp Narache, Deathknell, ...), where every new character has the same camp and the same quest giver (0 = AreaCapOutdoors).
+Playerbot.World.AreaCapStart = 10
 Playerbot.World.AreaRadius = 45
 # Temporary residents. PoolMax is the standing (core) roster; VariableMax more characters may exist next to it, created around a real
 # player where the core has nobody fitting (a new character on Zephras Isle, a new low-level player) and deleted again, with the
@@ -257,6 +279,14 @@ Playerbot.World.AreaRadius = 45
 # island is moved to a leveling town of the vanilla world. VariableMax = 0: no temporary residents.
 Playerbot.World.VariableMax = 2000
 Playerbot.World.VariableTtlHours = 24
+
+# Travel soak (for testing, off by default): a few world bots at a time are sent between towns, flight masters, quest hubs and docks of the
+# travel graph, across maps by flight path, boat or zeppelin too, and each leg is logged when it ends ("[travel_soak] leg ... arrived /
+# timeout / no_route"); a summary every ten minutes lists the 50 y cells where legs stopped most. Run it overnight with no player online.
+# TravelSoakBots legs run at once; a leg that takes longer than TravelSoakLegSeconds counts as stuck.
+Playerbot.World.TravelSoak = 0
+Playerbot.World.TravelSoakBots = 8
+Playerbot.World.TravelSoakLegSeconds = 1200
 
 #-----------------------------------------------------------------------------
 # Player interaction
@@ -394,7 +424,15 @@ Playerbot.Cast.MaxPct = 140
 #                        ghost bots and bots under 35% HP bypass it (healing, defensives, ress).
 #                        Replaces the old Playerbot.Reaction.* StartAttack holds, now removed.
 Playerbot.Pacing.DecisionDelayMs = 600
-Playerbot.Pacing.PvpReactionDelayMs = 700
+Playerbot.Pacing.PvpReactionDelayMs = 630
+
+# Reaction speed. A bot in combat whose global cooldown or cast ends between two of its regular tick slots (Combat 100 ms) is woken on
+# the world tick it ends in, instead of waiting out the rest of the slot (about 50 ms on average). Only bots in the Combat tier, at
+# most one wake per 40 ms each; no effect on the PvP reaction floor above. 0 = off. The [react] lines (channel playerbot.v2.react,
+# every 60 s, need Logger.playerbot.v2=3) show GCD-end -> next-cast, kick, and leave-hazard timings either way, so the setting can be
+# compared on and off.
+# HR-yes
+Playerbot.Reaction.WakeOnGcd = 1
 
 # Threat of non-tank bots grouped with a human, inside a dungeon or raid (not battlegrounds),
 # 0.3..1.5; 1.0 = off. Karrz's VMaNGOS value is 0.8 (tank 1.6; see Playerbot.TankThreatMultiplier).
@@ -481,6 +519,11 @@ Playerbot.Behavior.AcceptOwnerTrade = 1
 #   Playerbot.Gear.RaidIlvlCap   explicit item level ceiling; when set above 0 it overrides MaxTier. Default 0 (use MaxTier).
 Playerbot.Gear.MaxTier = 2
 Playerbot.Gear.RaidIlvlCap = 0
+#   Playerbot.Gear.RaidEnchants  every bot, world bots too, gets the permanent enchants a vanilla raider wore for its
+#                                role (chest, bracers, gloves, boots, cloak, weapon; Bot/Gear/RaidLoadout.cpp), on any worn piece
+#                                without one, when its gear is set up. Names the spell data lacks are skipped and logged
+#                                as "[enchant] unresolved". Default 1.
+Playerbot.Gear.RaidEnchants = 1
 #   Playerbot.World.Gear.MaxTier world / ambient / BG-fill bots (the ones nobody owns): the same tier scale as Gear.MaxTier,
 #                                default 1 (item level 76). Owned and raid bots keep Playerbot.Gear.MaxTier. A world bot wearing
 #                                a piece above this cap is re-geared down to it the next time the gear pass runs for it.
@@ -518,6 +561,10 @@ Playerbot.OwnedGear.AllowedModes = ""
 #                         talent_audit_<class>): a creature_template entry that can be attacked and does nothing; the runner makes it level 63,
 #                         3731 armor, 2 billion health. 0 (default): the first "Training Dummy" / "Target Dummy" template without a script.
 Playerbot.Scenario.DummyEntry = 0
+#   DamageParity.AllLegs  1 = every damage_parity run also does the four sensitivity legs (spell power, attack power, bare and sundered
+#                         armor), eight legs in all. 0 (default): the four reference legs (none, t1, t3, t3_buffed); a class that failed a check
+#                         in them runs the other four as well.
+Playerbot.DamageParity.AllLegs = 0
 #   AmmoSupply        a bot with a bow, crossbow or gun equipped (hunters; warriors / rogues if the generator gives
 #                     them one) is handed the best arrows / bullets its level allows, up to 1000, and the ammo slot
 #                     is pointed at them, whenever the stock drops under 30% (1000 = 300). Out of combat, bots only,
@@ -559,6 +606,9 @@ Playerbot.Behavior.InstanceGroupCap = 1
 #                     outside: grouped ones are kept first. Needs InstanceGroupCap = 1. Battleground and arena maps
 #                     are not capped by this. Range 1-40.
 Playerbot.Behavior.OpenWorldGroupCap = 40
+#
+#   Lfg.*             the Group Finder settings (Lfg.Enable, BotFillSeconds, InstantFillIfNobody, LevelRange, ActivityMaps,
+#                     Categories) live in worldserver.conf.d\zz-forever-lfg.conf.
 #   BgHumanPriority   a human queueing for a battleground never opens a second instance while a running one can
 #                     make room: a bot leaves it for the human, and a bots-only battleground keeps playing to its
 #                     normal end after the last human leaves ([bg_queue] log lines).
@@ -987,7 +1037,7 @@ PlayerbotV2.Alert.ThrottleMs = 300000
 #-----------------------------------------------------------------------------
 
 # Master switch for the bot guild system (founding, recruiting, membership).
-PlayerbotV2.Guilds.Enabled = 0
+PlayerbotV2.Guilds.Enabled = 1
 
 # Enable scheduled bot guild events (group activities, social cadence).
 PlayerbotV2.Guilds.EventsEnabled = 1
@@ -1053,8 +1103,9 @@ PlayerbotV2.Combat.SkipUnfightable       = 1
 # a mob already hitting a non-tank member (self-defence). Holding = the bot
 # stops attacking that mob (pet called back) but keeps healing / buffing.
 #   HoldEnabled        master switch
-#   HoldInOpenWorld    0 = dungeons/raids only (the owner: open-world groups just
-#                      fight); 1 = also hold in the open world
+#   HoldInOpenWorld    0 = dungeons, raids and raid groups only (the owner: open-world
+#                      parties just fight; a raid group holds wherever it fights);
+#                      1 = every group also holds in the open world
 #   MaxRatio           stay below this fraction of the tank's threat on the
 #                      target; over it, damage stops (and Fade / Feign Death /
 #                      Feint / Cower are used when ready)
@@ -1074,6 +1125,15 @@ Playerbot.Raid.DpsWaitForAttack       = 1
 #   Nightfin Soup). Bots always use ones they carry; with this on, the bags are stocked for them first (free, like
 #   the potion and reagent stock). Default 0; the server's make-configs set 1.
 Playerbot.Raid.ProvideConsumables     = 1
+# Playerbot.Raid.ConsumablesInDungeons  the same kits in dungeon instances (level 58+ bots in a group), not only raids.
+#   Default 1.
+Playerbot.Raid.ConsumablesInDungeons  = 1
+# Playerbot.Raid.ResistGear  grouped raid bots wear the vanilla pieces with the most resistance of the school a boss deals
+#   (the boss's Greater Protection Potion row: Vaelastrasz and Firemaw fire, Ebonroc / Flamegor / Nefarian shadow, Huhuran
+#   nature, Sapphiron frost) while they stand before it, and put their own gear back afterwards. Free pieces for the raid
+#   map, only where they add resistance, never in combat, nothing is destroyed. Tanks keep their armor pieces (head,
+#   shoulders, chest, legs, hands, feet). Molten Core and Onyxia are left alone. Default 0.
+Playerbot.Raid.ResistGear             = 0
 # Playerbot.Consumables.PvE / Playerbot.Consumables.PvP  server choice, separately for PvE (open world, dungeons,
 #   raids) and PvP (battlegrounds and arenas): whether bots use flasks, elixirs, buff food, combat healing and mana
 #   potions, healthstones and resistance potions on that kind of map. Off also stops ProvideConsumables stocking.
@@ -1081,6 +1141,33 @@ Playerbot.Raid.ProvideConsumables     = 1
 #   PvE 1, PvP 0.
 Playerbot.Consumables.PvE             = 1
 Playerbot.Consumables.PvP             = 0
+# Playerbot.AlwaysBuffs.<Switch>.<Place>  keeps bots supplied so nobody has to find or buy anything. Bots only; real players
+#   are never touched. Each switch is 1 (on) or 0 (off) for each place:
+#     Raid          raids and dungeons (any instance that is not a battleground)
+#     World         everywhere else (open world, cities)
+#     Battleground  battlegrounds and arenas
+#   Switches:
+#     Supplies     ammo, reagents, soul shards, poisons, runes, food, water and potions kept at the full stack, topped up as
+#                  soon as one is used, in a fight too. Defaults: 1 everywhere.
+#     Repair       gear kept at full durability with no repair bill, and at least 200 gold in the pocket. Defaults: 1 everywhere.
+#     WorldBuffs   Rallying Cry, Spirit of Zandalar, Songflower, Warchief's Blessing (Horde), and the Dire Maul buffs of the role,
+#                  put on as auras (no item, no cast). Defaults: 1 in Raid, 0 in World and Battleground.
+#     Consumables  the role's flask or elixirs, scrolls, stat food and weapon stone (Bot/AlwaysBuffs.h), put on as auras (no
+#                  item, no cast, no GCD), level 58+. Defaults: 1 in Raid, 0 in World and Battleground.
+#   A WorldBuffs or Consumables switch that is 0 where the bot stands also takes those auras off it, so they do not follow it
+#   from a raid into a battleground.
+Playerbot.AlwaysBuffs.Supplies.Raid          = 1
+Playerbot.AlwaysBuffs.Supplies.World         = 1
+Playerbot.AlwaysBuffs.Supplies.Battleground  = 1
+Playerbot.AlwaysBuffs.Repair.Raid            = 1
+Playerbot.AlwaysBuffs.Repair.World           = 1
+Playerbot.AlwaysBuffs.Repair.Battleground    = 1
+Playerbot.AlwaysBuffs.WorldBuffs.Raid        = 1
+Playerbot.AlwaysBuffs.WorldBuffs.World       = 0
+Playerbot.AlwaysBuffs.WorldBuffs.Battleground = 0
+Playerbot.AlwaysBuffs.Consumables.Raid       = 1
+Playerbot.AlwaysBuffs.Consumables.World      = 0
+Playerbot.AlwaysBuffs.Consumables.Battleground = 0
 # Playerbot.Raid.DpsWaitTimeoutMs  with DpsWaitForAttack: after the tanks have fought this long without the owner's
 #   Attack, the DPS go anyway (a forgotten Attack no longer wipes the raid). Eight seconds for a raid, because the tank
 #   takes a while to run in (a party's Pull keeps six); the value is limited to 1000-8000 (there is no "never").
@@ -1166,3 +1253,21 @@ Playerbot.LoadTest.MaxP99Ms = 100
 Playerbot.LoadTest.MaxAvgMs = 40
 Playerbot.LoadTest.MaxRssMb = 9000
 Playerbot.LoadTest.MaxSlowCallMs = 250
+
+#
+#    Playerbot.ClassicTalents.ApplyOnLogin
+#        Description: 0 = a bot that already holds all the talent points of its level on the build its talents show is not walked again at
+#                     login or in upkeep (the walk validates the whole trait config rank by rank and froze the world thread when
+#                     dozens of bots logged in together). Walks that remain run at most one per world update. 1 = walk every bot as before.
+#        Default:     0
+
+Playerbot.ClassicTalents.ApplyOnLogin = 0
+
+#
+#    Playerbot.ClassicTalents.WalkBudgetMs
+#        Description: The longest one bot's talent walk may hold the world thread, in milliseconds. A walk that reaches it keeps the ranks
+#                     it validated, logs an error once per class and spec, and the bot is not walked again until its level, spec or
+#                     ranks change.
+#        Default:     250
+
+Playerbot.ClassicTalents.WalkBudgetMs = 250

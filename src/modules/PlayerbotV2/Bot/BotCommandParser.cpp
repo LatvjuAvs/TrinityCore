@@ -1659,12 +1659,33 @@ bool OwnerWordOrder(Player* sender, Player* bot, std::string const& n)
         return true;
     }
     // ---- invite (whispered: the bot invites its owner) --------------------------------------------------------------
+    // "leave" / "leave group": the bot leaves whatever group it is in (a bots-only remainder after its owner left, for one).
+    if ((n == "leave" || n == "leave group" || n == "leavegroup") && t_direct_whisper)
+    {
+        if (!bot->GetGroup())
+        {
+            say(me + ": I am not in a group");
+            return true;
+        }
+        Push(bot, GroupLeaveIntent{});
+        say(me + ": leaving the group");
+        return true;
+    }
     if (n == "invite" && t_direct_whisper)
     {
         if (Group const* g = bot->GetGroup(); g && g->IsMember(sender->GetGUID()))
         {
             say(me + ": you are already in my group");
             return true;
+        }
+        // In a group of bots only (left behind when its owner left): leave it first, or the invite below could not be made.
+        if (Group const* g = bot->GetGroup())
+        {
+            bool has_player = false;
+            for (auto const& slot : g->GetMemberSlots())
+                if (slot.guid != bot->GetGUID() && !Services::Registry().has(slot.guid.GetCounter())) { has_player = true; break; }
+            if (!has_player)
+                Push(bot, GroupLeaveIntent{});
         }
         Push(bot, InviteToGroupIntent{sender->GetGUID()});
         say(me + ": invite sent");
@@ -3369,7 +3390,7 @@ bool BotCommandParser::DispatchSingleImpl(Player* sender, Player* bot, std::stri
             Push(bot, WhisperIntent{sender->GetName(), "no snapshot."});
             return true;
         }
-        constexpr uint8 TRINKET1 = 13, TRINKET2 = 14;
+        constexpr uint8 TRINKET1 = 12, TRINKET2 = 13;   // EQUIPMENT_SLOT_TRINKET1 / TRINKET2
         const BotSnapshotView v{*snap};
         for (uint8 slot : {TRINKET1, TRINKET2})
         {
@@ -4141,7 +4162,14 @@ bool BotCommandParser::DispatchSingleImpl(Player* sender, Player* bot, std::stri
         // A healer keeps healing on Attack and does not walk in to melee (playtest, Deadmines 2026-10-15): it takes no engage order. Its
         // own fight logic heals first and casts or wands at the group's target only while nobody needs healing.
         if (BotRole(bot) == Role::Healer)
+        {
+            // A Stay left by an earlier order (the altar's "then I stay there", 30 min) pinned both priests at the altar while
+            // Pyroguard Emberseer killed one in melee at 3 y (UBRS 20 Oct 21:02): the Attack ends it, the healer follows and heals again.
+            if (BotAI* heal_ai = Services::Registry().ai(bot->GetGUID().GetCounter()))
+                if (heal_ai->holding_position(GameTime::GetGameTimeMS()))
+                    heal_ai->exit_manual();
             return true;
+        }
         Push(bot, StartAttackIntent{target->GetGUID()});
         if (BotAI* ai = Services::Registry().ai(bot->GetGUID().GetCounter()))
         {
