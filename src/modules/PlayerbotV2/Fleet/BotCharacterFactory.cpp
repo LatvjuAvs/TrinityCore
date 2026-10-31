@@ -218,6 +218,9 @@ bool IsBotAppearanceValid(uint8 race, uint8 gender, uint8 cls, std::vector<std::
     auto const* options = sDB2Manager.GetCustomiztionOptions(race, gender);
     if (!options)
         return current.empty();
+    // Local: no choices at all is not valid either. Migration 0033 clears every bot's appearance and relies on this repair to roll new ones (0 of 841 repaired without it).
+    if (current.empty())
+        return false;
 
     AppearanceTemplate tmpl;
     bool haveTemplate = false;
