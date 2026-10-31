@@ -206,7 +206,9 @@ void BotNamePool::ReconcileOnBoot()
     // This catches SQL-wipes / mid-create crashes that bypassed Release.
     auto orphan_res = CharacterDatabase.Query(fmt::format(
         "SELECT pn.name_id FROM {}.playerbots_names pn "
-        "LEFT JOIN characters.characters c ON c.guid = pn.used_by_guid "
+        // Local (M7, 2026-10-31): was characters.characters, a database name of upstream's install. The query already runs on
+        // the characters database; on ours (forever_characters) it failed at every start and no wiped bot's name came back.
+        "LEFT JOIN characters c ON c.guid = pn.used_by_guid "
         "WHERE pn.is_used = 1 AND (pn.used_by_guid IS NULL OR c.guid IS NULL)",
         SharedDb()).c_str());
 
