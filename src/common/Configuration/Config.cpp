@@ -178,6 +178,8 @@ bool ConfigMgr::LoadAdditionalDir(std::string const& dir, bool keepOnReload, std
     if (!fs::exists(dirPath) || !fs::is_directory(dirPath))
         return true;
 
+    // Local: name order, so a later file reliably overrides an earlier one (the directory's own order depends on the file system).
+    std::vector<fs::path> configFiles;
     for (fs::directory_entry const& f : fs::recursive_directory_iterator(dirPath))
     {
         if (!fs::is_regular_file(f))
@@ -187,6 +189,12 @@ bool ConfigMgr::LoadAdditionalDir(std::string const& dir, bool keepOnReload, std
         if (configFile.extension() != ".conf")
             continue;
 
+        configFiles.push_back(std::move(configFile));
+    }
+    std::sort(configFiles.begin(), configFiles.end());
+
+    for (fs::path const& configFile : configFiles)
+    {
         std::string fileName = configFile.generic_string();
         std::string error;
         if (LoadAdditionalFile(fileName, keepOnReload, error))

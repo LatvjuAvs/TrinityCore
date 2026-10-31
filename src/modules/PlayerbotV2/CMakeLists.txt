@@ -234,8 +234,7 @@ endif()
 
 trinity_add_module(playerbot-v2 AddSC_playerbot_v2
   CONFIGS
-    ${CMAKE_CURRENT_SOURCE_DIR}/conf/playerbot.conf.dist
-    ${CMAKE_CURRENT_SOURCE_DIR}/conf/zz-0-playerbot-defaults.conf)
+    ${CMAKE_CURRENT_SOURCE_DIR}/conf/playerbot.conf.dist)
 
 # Default settings (world bots, auction house bot, bot logging) as an active file in worldserver.conf.d, so the bots work
 # out of the box. An existing copy is never overwritten.
