@@ -141,10 +141,11 @@ inline int32 ManaPct(BotSnapshotView const& s)
 }
 
 // The mana-efficiency rules apply (see the header comment): any group inside a raid or 5-man instance map
-// (Bot/ClassicHealScope.h). The name is the older "raid" one.
+// (Bot/ClassicHealScope.h), and a raid group anywhere: five healers of the support scorecard on open ground (230) played by the plain
+// rules, every one rolling Renew on every raider a pulse hit (57% overheal, the holy priest out of mana). The name is the older "raid" one.
 inline bool RaidHealing(BotSnapshotView const& s)
 {
-    return EfficiencyRulesApply(s.is_in_raid(), s.is_in_dungeon(), s.in_battleground(), IsVanillaRealm());
+    return EfficiencyRulesApply(s.is_in_raid() || s.in_raid_group(), s.is_in_dungeon(), s.in_battleground(), IsVanillaRealm());
 }
 
 // Playerbot.Behavior.HealClaims (default on): the raid in-flight heal dedupe, the HoT claims and
@@ -1427,18 +1428,32 @@ inline void NoteHealChoice(BotSnapshotView const& s, uint32 spell, Patient const
         plan.want, plan.est, ManaPct(s));
 }
 
-// The flat mana cost of the spell (talent discounts ignored, as is_ready does for rage and energy): a heal the healer cannot pay is
-// refused by the core with NO_POWER; sending it keeps the healer casting at nothing instead of the rules that can still help.
-// Percent-of-base-mana costs are not in the snapshot and count as affordable.
+// The mana cost of the spell (talent discounts ignored, as is_ready does): a heal the healer cannot pay is refused by the core with NO_POWER;
+// sending it keeps the healer casting at nothing instead of the rules that can still help. Percent-of-base-mana costs count (the snapshot
+// carries the base mana; BotSnapshotView::mana_cost converts them): the flat-only check let the shaman and druid heal ranks priced in percent
+// through at 5 % mana.
 inline bool CanPayMana(BotSnapshotView const& s, uint32 spell_id)
 {
-    SpellInfo const* si = sSpellMgr->GetSpellInfo(spell_id, DIFFICULTY_NONE);
-    if (!si)
-        return true;
-    for (SpellPowerEntry const* pw : si->PowerCosts)
-        if (pw && pw->PowerType == POWER_MANA && pw->ManaCost > 0 && !pw->RequiredAuraSpellID && s.power(POWER_MANA) < pw->ManaCost)
-            return false;
-    return true;
+    int32 const cost = s.mana_cost(spell_id);
+    return cost <= 0 || s.power(POWER_MANA) >= cost;
+}
+
+// The planned rank when the healer can pay it, else the highest known rank below it that it can (a healer at low mana downranks instead of
+// sending a cast the core refuses with NO_POWER); 0 when no rank is payable.
+inline uint32 AffordableRank(BotSnapshotView const& s, uint32 spell, uint32 planned)
+{
+    uint32 const want = planned ? planned : s.resolve_rank(spell);
+    if (!want || CanPayMana(s, want))
+        return want;
+    uint32 best = 0;
+    for (uint32 const r : s.known_ranks(spell))
+    {
+        if (r == want)
+            break;
+        if (CanPayMana(s, r))
+            best = r;   // ranks ascend: the last payable one below the wanted rank is the highest
+    }
+    return best;
 }
 
 inline bool PayableOrLog(BotSnapshotView const& s, uint32 spell_id, Patient const& p)
@@ -1472,11 +1487,19 @@ inline bool EmitHeal(BotSnapshotView const& s, GroupSnapshotView const& g, BotIn
     ObjectGuid const target = p.guid.IsEmpty() ? s.guid() : p.guid;
     if (!RaidHealing(s) || !HealClaimsOn())
     {
-        HealPlan const plan = PlanHeal(s, g, spell, p);
+        HealPlan plan = PlanHeal(s, g, spell, p);
         if (plan.skip)
             return false;
-        if (RaidHealing(s) && !PayableOrLog(s, plan.rank ? plan.rank : s.resolve_rank(spell), p))
-            return false;
+        if (uint32 const afford = AffordableRank(s, spell, plan.rank); afford != (plan.rank ? plan.rank : s.resolve_rank(spell)))
+        {
+            if (!afford)
+            {
+                PayableOrLog(s, plan.rank ? plan.rank : s.resolve_rank(spell), p);   // logs the refusal
+                return false;
+            }
+            plan.rank = afford;
+            plan.est = ExpectedHeal(sSpellMgr->GetSpellInfo(afford, DIFFICULTY_NONE), s);
+        }
         bool const sent = plan.rank ? e.cast_rank(plan.rank, target) : e.cast(spell, target);
         if (sent && RaidHealing(s))
         {
@@ -1504,11 +1527,19 @@ inline bool EmitHeal(BotSnapshotView const& s, GroupSnapshotView const& g, BotIn
                 return false;
             }
         }
-        HealPlan const plan = PlanHeal(s, g, spell, q);
+        HealPlan plan = PlanHeal(s, g, spell, q);
         if (plan.skip)
             return false;
-        if (!PayableOrLog(s, plan.rank ? plan.rank : s.resolve_rank(spell), q))
-            return false;
+        if (uint32 const afford = AffordableRank(s, spell, plan.rank); afford != (plan.rank ? plan.rank : s.resolve_rank(spell)))
+        {
+            if (!afford)
+            {
+                PayableOrLog(s, plan.rank ? plan.rank : s.resolve_rank(spell), q);   // logs the refusal
+                return false;
+            }
+            plan.rank = afford;
+            plan.est = ExpectedHeal(sSpellMgr->GetSpellInfo(afford, DIFFICULTY_NONE), s);
+        }
         bool const sent = plan.rank ? e.cast_rank(plan.rank, target) : e.cast(spell, target);
         if (!sent)
             return false;

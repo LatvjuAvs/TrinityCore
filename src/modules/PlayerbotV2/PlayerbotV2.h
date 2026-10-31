@@ -54,6 +54,7 @@ public:
     void NoteDamageSpell(uint32 spell_id);
     void OnHitOutcome(Unit* attacker, Unit* victim, uint32 spell_id, uint8 outcome, uint32 damage);
     void OnEnergize(Unit* target, uint32 spell_id, int32 gained, uint8 power);
+    void OnHealOutcome(Unit* healer, Unit* target, uint32 spell_id, uint32 raw, uint32 effective);
     void OnHealReceived(Unit* healer, Unit* target, int32 amount, uint32 spell_id);
     void OnAuraApplied(Unit* target, Aura* aura);
     void OnAuraRemoved(Unit* target, Aura* aura);
@@ -95,6 +96,7 @@ public:
     void OnSpiritReleased(Player* p);
     // A raid member's sub-group changed: an owned companion's is stored (OwnerRegistry::SetSubgroup).
     void OnRaidSubgroupChanged(Group* group, ObjectGuid member, uint8 subgroup);
+    void OnGroupMemberRemoved(Group* group, ObjectGuid member, uint8 method, ObjectGuid kicker);
     // SC-P2b: a new guild member joined — one online bot guildmate welcomes.
     void OnGuildMemberAdded(uint64 guild_id, ObjectGuid joiner_guid, std::string const& joiner_name);
 

@@ -16,6 +16,8 @@
 #include <functional>
 #include <string_view>
 #include "InstanceSchools.h"
+#include "AlwaysBuffs.h"
+#include "ClassicSupplies.h"   // RaidConsumableRole
 #include "BotTypes.h"
 #include "ObjectGuid.h"
 #include <vector>
@@ -90,14 +92,19 @@ bool InstanceDealsSchool(uint32 map_id, Resist school);
 // the fear prep ([raid_fear]).
 bool BossFears(uint32 map_id, uint32 creature_entry);
 
-// The resistance potion for an instance's resistance (Fire: Greater Fire
-// Protection Potion 13457), 0 when there is none.
+// The Greater Protection Potion for a resistance school (Fire 13457, Frost
+// 13456, Nature 13458, Shadow 13459), 0 when there is none.
 uint32 ResistPotionItem(Resist r);
 
 // In combat: the resistance potion the raid plan asks this bot to drink
 // (PveOrder::resist_potion, opt-in Playerbot.Raid.ResistPotions) when it is
 // in the bags, off cooldown and its protection is not already up. 0 = none.
 uint32 PickResistPotion(BotSnapshotView const& s);
+
+// Raid resistance gear (Playerbot.Raid.ResistGear): the school (SpellSchools value) of the boss a grouped bot stands before: the nearest living
+// boss within the bot's 40 yd scan whose RaidRules::resistPotion row names a Greater Protection Potion, on a map the swap runs on
+// (Bot/ResistGear.h). 0 = none: the bot wears its own gear.
+uint8 PickResistGearSchool(BotSnapshotView const& s);
 
 // Dwarf priest: Fear Ward (6346) on the tank the raid plan gave it
 // (PveOrder::fear_ward_target) while that tank is in range. spell 0 = nothing.
@@ -261,8 +268,15 @@ void ShortClassSupplies(BotSnapshotView const& s, std::vector<uint32>& out);
 // PickRaidConsumableStock: the kit item the bags are short of whose buff is missing, to stock (0 = none).
 // Playerbot.Consumables.PvE / .PvP for the bot's current map (battlegrounds and arenas are PvP, everything else PvE).
 bool ConsumablesAllowed(BotSnapshotView const& s);
+// Playerbot.AlwaysBuffs.<Switch>.<Place>: where the bot stands (a battleground or arena map, else a raid or dungeon instance, else the world)
+// and whether a switch is on there. A bot in a raid-type group counts as in a raid wherever it stands (the dps scorecard fights in the
+// open world with a 22-bot raid and its flasks and world buffs were stripped there).
+AlwaysPlace AlwaysPlaceOf(BotSnapshotView const& s, GroupSnapshotView const* g = nullptr);
+bool AlwaysOn(BotSnapshotView const& s, AlwaysSwitch what, GroupSnapshotView const* g = nullptr);
 uint32 PickRaidConsumable(BotSnapshotView const& s, GroupSnapshotView const& g);
 uint32 PickRaidConsumableStock(BotSnapshotView const& s, GroupSnapshotView const& g);
+// The role whose kit (ClassicSupplies RaidConsumablesFor) the bot drinks: the group's role first, then the tank test, then the spec.
+RaidConsumableRole RaidConsumableRoleOf(BotSnapshotView const& s, GroupSnapshotView const& g);
 
 // Physical melee damage dealer or tank by class and (virtual Classic) spec.
 bool IsMeleeSpec(uint8 cls, uint32 spec);
@@ -326,6 +340,7 @@ struct RecoveryPick
 {
     uint32 item = 0;     // food / drink to use now
     bool   hold = false; // already eating / drinking: stay seated
+    bool   drink = false; // `item` is a drink (it may be announced in party chat, Bot/DrinkSay.h)
 };
 RecoveryPick PickRecovery(BotSnapshotView const& s, int32 start_hp, int32 start_mana);
 
@@ -399,8 +414,9 @@ uint32 PickCombatManaItem(BotSnapshotView const& s, GroupSnapshotView const* g =
 constexpr int32 kCombatHealthItemPct = 30;
 // Mana % at or below which a group healer in a boss fight uses a mana item.
 constexpr int32 kBossHealerManaItemPct = 35;
-// ... and the mana % above which it does not even look: from here down an item is used as soon as its restore fits in the missing mana.
-constexpr int32 kHealerManaItemCeilingPct = 85;
+// ... and the mana % above which it does not even look. The items are on a 2-minute cooldown: spent at 71-81 % (UBRS 20 Oct, both priests)
+// they were on cooldown when the bar ran dry 80 s later, so a healer uses one only when mana is low.
+constexpr int32 kHealerManaItemCeilingPct = 30;
 
 // ======================= Boss fights (major cooldowns) =======================
 // A boss by its creature data: the dungeon-boss flag or the world-boss rank

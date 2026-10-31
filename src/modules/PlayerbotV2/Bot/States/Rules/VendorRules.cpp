@@ -829,7 +829,9 @@ bool BagsFullRecoverFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView 
 // anti-freeze, i.e. keep questing, until cross-map routing is added here).
 bool CapitalBagRunGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, uint32 now_ms)
 {
-    if (s.in_combat() || s.is_casting() || s.raw().movement.is_mounted) return false;
+    // A bot that has a target or is being attacked is in a fight whatever its combat flag says (the flag drops between casts on a target that does
+    // not hit back); the walk would cancel the next cast (205 fire mage: 25 s of a 180 s leg).
+    if (s.in_combat() || s.is_casting() || s.raw().movement.is_mounted || !s.victim().IsEmpty() || s.attackers_count() > 0) return false;
     if (s.in_group() || s.is_in_dungeon() || s.in_battleground()) return false;
     // Unreachable-city back-off: a prior in-city walk gave up (navmesh gap at the
     // banker/AH cluster). Yield to questing for the cooldown so the bot levels off

@@ -7,11 +7,13 @@
 // worker threads read the maps, so the module must not tick while they update), Shutdown with the world.
 
 #include "PlayerbotV2.h"
+#include "LfgBotFill.h"
 #include "Config.h"
 #include "DB2Stores.h"
 #include "Group.h"
 #include "Guild.h"
 #include "Item.h"
+#include "ObjectAccessor.h"
 #include "GameTime.h"
 #include "Log.h"
 #include "PathGenerator.h"
@@ -99,6 +101,12 @@ public:
 
     void OnLogin(Player* player, bool /*firstLogin*/) override
     {
+        if (player->GetSession() && player->GetSession()->IsBot())
+        {
+            // A bot has no client to choose its ammo: it takes a stack that is drawn with a model, not the generic white box.
+            player->SetPreferDrawableAmmo(true);
+            player->AutoSelectAmmo();
+        }
         Module::instance().OnPlayerLogin(player);
     }
 
@@ -263,6 +271,25 @@ public:
             Module::instance().OnPlayerJoinedLfg(player, dungeonId, roles);
     }
 
+    // A player posted or removed a Group Finder listing: bots fill the group if nobody joins in time.
+    void OnGroupFinderListing(Player* player, uint32 categoryId, std::vector<uint32> const& activities, bool listed) override
+    {
+        if (IsHuman(player))
+            Playerbot::V2::LfgListingChanged(player, categoryId, activities, listed);
+    }
+
+    // A player invited a member of a bot group listed in the Group Finder: that is their sign-up.
+    bool OnGroupFinderJoinRequest(Player* member, Player* applicant) override
+    {
+        return Playerbot::V2::LfgBotGroupJoinRequest(member, applicant);
+    }
+
+    // A player searched the Group Finder list: a faction without a bot group gets one now, so the first search already shows it.
+    void OnGroupFinderSearch(Player* searcher) override
+    {
+        Playerbot::V2::LfgBotGroupsOnSearch(searcher);
+    }
+
     // Bots accept a proposal well inside the proposal time instead of waiting for the snapshot poll.
     void OnLfgProposal(Player* player, uint32 proposalId) override
     {
@@ -280,6 +307,11 @@ public:
         Module::instance().NoteDamageSpell(spellInfo ? spellInfo->Id : 0);
     }
 
+    void OnHitOutcome(Unit* attacker, Unit* victim, uint32 spellId, uint8 outcome, uint32 damage) override
+    {
+        Module::instance().OnHitOutcome(attacker, victim, spellId, outcome, damage);
+    }
+
     void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
     {
         Module::instance().OnDamageTaken(attacker, victim, int32(damage), 0);
@@ -290,6 +322,11 @@ public:
         if (attacker && victim && victim->GetTypeId() == TYPEID_UNIT)
             if (Player* dealer = attacker->GetCharmerOrOwnerPlayerOrPlayerItself())
                 Playerbot::Raid::DealtHit(victim->GetEntry(), victim->GetName().c_str(), dealer->GetGUID().GetCounter(), damage);
+    }
+
+    void OnHealOutcome(Unit* healer, Unit* target, uint32 spellId, uint32 raw, uint32 effective) override
+    {
+        Module::instance().OnHealOutcome(healer, target, spellId, raw, effective);
     }
 
     // Raid mana ledger: healing that landed (the core passes the effective gain, overheal already removed).
@@ -314,6 +351,18 @@ public:
     void OnSubgroupChange(Group* group, ObjectGuid guid, uint8 subgroup) override
     {
         Module::instance().OnRaidSubgroupChanged(group, guid, subgroup);
+    }
+
+    // A bot that joins a group has the riding and mount its level allows (a world bot a player invited rides with him).
+    void OnAddMember(Group* group, ObjectGuid guid) override
+    {
+        Module::instance().OnGroupMemberJoined(group, ObjectAccessor::FindConnectedPlayer(guid));
+    }
+
+    // Before the member is taken out: an owner who removes a companion (or a companion that leaves) lets it go.
+    void OnRemoveMember(Group* group, ObjectGuid guid, RemoveMethod method, ObjectGuid kicker, char const* /*reason*/) override
+    {
+        Module::instance().OnGroupMemberRemoved(group, guid, uint8(method), kicker);
     }
 };
 

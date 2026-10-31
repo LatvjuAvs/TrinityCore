@@ -56,8 +56,8 @@ constexpr ThreatDrop kThreatDrops[] = {
     { 4, 1966, 0,   true  },   // Rogue: Feint
     { 11, 8998, 768, true },   // Druid: Cower (Cat Form)
 };
-constexpr int kThreatDropPct = 60;   // percent of the tank's threat from which a rotation sheds threat
-constexpr int kThreatHighPct = 80;   // percent of the tank's threat from which a rotation uses its big threat drop
+constexpr int kThreatDropPct = 60;   // percent of the tank's threat from which a rotation sheds threat (VMaNGOS medium-threat trigger)
+constexpr int kThreatHighPct = 80;   // VMaNGOS high-threat trigger
 
 // How long a raid's DPS wait after the tank's first hit on a boss before they open by themselves (the owner's Attack still releases them at
 // once). The tank runs in from the room's edge and builds its lead in that time; the dungeons' parties keep their own, shorter wait. The one

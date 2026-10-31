@@ -275,6 +275,10 @@ public:
     // Cast a spell on an Item (disenchant 13262 / prospect 31252 / mill 51005).
     bool cast_on_item(uint32 spell_id, ObjectGuid item_guid)
     { return emit(CastSpellOnItemIntent{spell_id, item_guid}); }
+    // Weapon imbue (Windfury / Flametongue / Rockbiter Weapon) on the bot's own weapon, under the same 30 s retry lockout as the
+    // out-of-combat idle:classic_weapon rule: an imbue the server refuses (or the snapshot does not show yet) is not re-sent every
+    // tick, and the rotation falls through to its other rules while the lockout runs.
+    bool cast_imbue(uint32 spell_id, ObjectGuid item_guid);
 
     // Vehicle controls. enter_vehicle takes a Unit GUID of the vehicle
     // (a Creature or other Unit with a VehicleKit) and an optional seat
@@ -310,8 +314,8 @@ public:
     { return emit(VehicleGroundSpellIntent{spell_id, x, y, z}); }
     bool accept_quest(ObjectGuid giver, uint32 quest_id)
     { return emit(QuestAcceptIntent{giver, quest_id}); }
-    bool complete_quest(ObjectGuid giver, uint32 quest_id, uint8 reward_choice = 0)
-    { return emit(QuestCompleteIntent{giver, quest_id, reward_choice}); }
+    bool complete_quest(ObjectGuid giver, uint32 quest_id, uint8 reward_choice = 0, bool copy_leader = false)
+    { return emit(QuestCompleteIntent{giver, quest_id, reward_choice, copy_leader}); }
     bool abandon_quest(uint32 quest_id) { return emit(QuestAbandonIntent{quest_id}); }
     bool accept_shared_quest() { return emit(QuestSharedAcceptIntent{}); }
     bool resolve_junk_quests() { return emit(ResolveJunkQuestsIntent{}); }
@@ -397,6 +401,9 @@ public:
     // Raid preparation: hand the bot one flask / elixir / food of its role kit (EconomyOp::StockRaidConsumable).
     bool stock_raid_consumable(uint32 item)
     { return emit(EconomyIntent{EconomyOp::StockRaidConsumable{item}}); }
+    // Raid preparation: resistance gear for `school` on, or the bot's own back on (0) (EconomyOp::ResistGear).
+    bool resist_gear(uint8 school)
+    { return emit(EconomyIntent{EconomyOp::ResistGear{school}}); }
 
     // Battleground / arena queue. `arena_type` 0 = battleground (solo or
     // group-leader), 2/3/5 = arena skirmish bracket (group-leader only).

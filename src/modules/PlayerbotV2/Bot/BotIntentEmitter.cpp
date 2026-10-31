@@ -437,6 +437,34 @@ static bool HasCastTime(uint32 spell_id)
     return si && si->CalcCastTime() > 0;
 }
 
+namespace
+{
+// Cat, Bear, Dire Bear, Moonkin, Travel and Aquatic Form.
+bool IsDruidShapeshiftSpell(uint32 spell_id)
+{
+    switch (spell_id)
+    {
+        case 768: case 5487: case 9634: case 24858: case 783: case 1066:
+            return true;
+        default:
+            return false;
+    }
+}
+}
+
+bool BotIntentEmitter::cast_imbue(uint32 spell_id, ObjectGuid item_guid)
+{
+    if (!ai_)
+        return emit(CastSpellOnItemIntent{spell_id, item_guid});
+    uint32 const now_ms = GameTime::GetGameTimeMS();
+    if (ai_->action_recently_tried(BotAI::ActionKind::ClassUpkeep, spell_id, now_ms))
+        return false;
+    bool const pushed = emit(CastSpellOnItemIntent{spell_id, item_guid});
+    if (pushed)
+        ai_->note_action_retry(BotAI::ActionKind::ClassUpkeep, spell_id, now_ms);
+    return pushed;
+}
+
 bool BotIntentEmitter::cast(uint32 spell_id, ObjectGuid target)
 {
     if (ai_ && ai_->mana_break_active(GameTime::GetGameTimeMS()) && HasCastTime(spell_id))
@@ -464,6 +492,11 @@ bool BotIntentEmitter::cast(uint32 spell_id, ObjectGuid target)
         const uint32 now_ms = GameTime::GetGameTimeMS();
         if (ai_->cast_recently_emitted(spell_id, now_ms))
             return false;
+        // A bot that has just clicked a battleground flag or banner left its druid form to do it (API::use_game_object); the
+        // rotation's form rule shifted it straight back in and the next click left it again (WSG 2026-10-21: a dire bear druid
+        // "leaves form 8" three times in 7 s at a dropped flag and never took it).
+        if (IsDruidShapeshiftSpell(spell_id) && ai_->action_recently_tried(BotAI::ActionKind::BgFormHold, 0, now_ms))
+            return false;
         uint32 const gcd_ms = GcdLengthMs(spell_id);
         if (gcd_ms && ai_->gcd_recently_started(now_ms))
             return false;
@@ -490,6 +523,11 @@ bool BotIntentEmitter::cast_rank(uint32 spell_id, ObjectGuid target)
     {
         const uint32 now_ms = GameTime::GetGameTimeMS();
         if (ai_->cast_recently_emitted(spell_id, now_ms))
+            return false;
+        // A bot that has just clicked a battleground flag or banner left its druid form to do it (API::use_game_object); the
+        // rotation's form rule shifted it straight back in and the next click left it again (WSG 2026-10-21: a dire bear druid
+        // "leaves form 8" three times in 7 s at a dropped flag and never took it).
+        if (IsDruidShapeshiftSpell(spell_id) && ai_->action_recently_tried(BotAI::ActionKind::BgFormHold, 0, now_ms))
             return false;
         uint32 const gcd_ms = GcdLengthMs(spell_id);
         if (gcd_ms && ai_->gcd_recently_started(now_ms))

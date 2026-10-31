@@ -1257,6 +1257,9 @@ void DispatchInGroup(BotAI& ai,
     // re-issued when the slot has moved more than 2 y from the last one (500 ms apart at most), a bot stops within
     // 1.5 y of the slot and restarts only beyond 2.5 y (no jitter), and a bot that makes no progress for 3 s falls
     // back to the plain follow behind the owner for 8 s.
+    // While the anchor is on the move a follower starts at its follow distance (+1.5 yd), not at the full recall slack; a standing
+    // anchor keeps the wide slack, so nobody shuffles about at a halt.
+    const bool anchor_on_the_move = ai.anchor_moving(anchor->x, anchor->y, snapshot.published_at_ms());
     if (formation_slot_active)
     {
         auto& ft = ai.formation_track();
@@ -1288,6 +1291,18 @@ void DispatchInGroup(BotAI& ai,
                     emit.follow(anchor->guid, plain.distance, plain.angle_radians);
                     ai.set_last_rule_fired("ingroup:formation_fallback");
                     action = 3;
+                }
+                else if (anchor_on_the_move)
+                {
+                    // The owner is walking: the follow generator keeps the bot at its slot's distance and angle and re-aims every update, which
+                    // starts the moment the owner does. Walking to the slot as it stood at the last issue (a point the owner has left by
+                    // the time the bot gets there, re-issued at most every 500 ms and only after the slot moved 2 y) left the circle trailing
+                    // far behind a walking owner (PC 20 Oct, circle, tight, 1 yd). The slot walk settles the bots once the owner halts.
+                    ft.dest_valid = false;
+                    ft.last_progress_ms = formation_now_ms;
+                    emit.follow(anchor->guid, formation_offset.distance, formation_offset.angle_radians);
+                    ai.set_last_rule_fired("ingroup:formation_follow");
+                    action = 1;
                 }
                 else
                 {
@@ -1341,8 +1356,9 @@ void DispatchInGroup(BotAI& ai,
     else if (!formation_fallback && ai.formation_track().dest_valid)
         ai.formation_track().dest_valid = false;
 
+    const float recall_now = anchor_on_the_move ? std::min(kRecallSlack, std::max(kFollowDistance + 1.5f, 5.0f)) : kRecallSlack;
     if (!formation_slot_active && !movement_owned_elsewhere &&
-        (dist > kRecallSlack || (refollow && dist > 1.5f)))
+        (dist > recall_now || (refollow && dist > 1.5f)))
     {
         // Follow uses MotionMaster MoveFollow, which silently re-emits forever
         // when the leader is unreachable (across a gap / closed door) — and
@@ -1455,10 +1471,11 @@ void DispatchInGroup(BotAI& ai,
     // BG maps generally disallow mounts and the InCombat dispatch already
     // dismounts on attack. Letting these fire would spam intents the
     // spell engine rejects.
-    // A companion mounts when its owner does, wherever it is: owner and party ride off together. Others only mount to
-    // close a real gap.
+    // A bot in a group with a player (its owner's companion, or a world bot the player invited) mounts when the leader does, wherever it
+    // is: leader and party ride off together (2026-10-19: a level 59 bot ran after a mounted player on foot). Others only mount to close a
+    // real gap.
     const bool want_mount = !in_active_bg &&
-                            (dist > kMountThreshold || snapshot.is_companion_with_owner()) &&
+                            (dist > kMountThreshold || snapshot.is_led_by_player()) &&
                             leader_member->is_mounted &&
                             !snapshot.is_mounted() &&
                             !snapshot.is_indoors() &&
@@ -1471,7 +1488,7 @@ void DispatchInGroup(BotAI& ai,
     // knows not to wipe a pending dismount deadline.
     const bool want_dismount = !in_active_bg && snapshot.is_mounted() &&
                                !leader_member->is_mounted &&
-                               dist <= kMountThreshold;
+                               (dist <= kMountThreshold || snapshot.is_led_by_player());
     if (want_mount)
     {
         // Edge-triggered: a mount cast takes ~1.5s; without dedup we'd spam
@@ -1496,6 +1513,20 @@ void DispatchInGroup(BotAI& ai,
                 emit.mount_appropriate();
                 ai.set_mount_pending(true);
                 ai.set_last_rule_fired("ingroup:mount");
+            }
+        }
+        else
+        {
+            // Still not mounted a few seconds after the cast was sent: it failed (interrupted by the follow, moving, a stuck cast) and
+            // nothing else clears the flag while the leader stays mounted, so the bot rode nowhere (playtest 10-19: one of three on foot).
+            // Ask again.
+            constexpr uint32 kMountRetryMs = 4000u;
+            const uint32 now_ms = snapshot.published_at_ms();
+            const uint32 sent_at = ai.pending_follow_mount_at_ms();
+            if (sent_at != 0 && now_ms >= sent_at + kMountRetryMs)
+            {
+                ai.set_mount_pending(false);
+                ai.set_pending_follow_mount_at_ms(0);
             }
         }
     }

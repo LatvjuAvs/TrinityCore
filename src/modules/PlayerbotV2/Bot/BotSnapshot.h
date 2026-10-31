@@ -77,6 +77,9 @@ struct EquippedItem
     // is_ready(on_use_spell_id) without dragging ItemTemplate into the
     // worker thread. Used by InCombat for trinket auto-fire on cooldown.
     uint32 on_use_spell_id = 0;
+    // Remaining cooldown of that spell in ms (the item's use cooldown). The trinket's spell is not in the spellbook, so the snapshot's
+    // spell cooldown rows never carry it.
+    uint32 on_use_cd_ms = 0;
     // Stat block for the equipped item. Lets the equip-upgrade rule
     // compute score(equipped[slot]) without re-resolving the live Item*.
     ItemStatBlock stats{};
@@ -307,6 +310,8 @@ struct NearbyUnit
     // nearby_enemies). Drives the tanks' Demo refresh over a pack
     // (TankThreat::DemoMissingAround).
     int32      ap_debuff_ms = 0;
+    // A root or a snare (movement slowed) is on the unit. Hostile units (attackers + nearby_enemies).
+    bool       snared = false;
     // The unit is immune to a stun right now (template / aura mechanic
     // immunity, probed with Bash's stun effect - most raid bosses). Hostile
     // units (attackers + nearby_enemies). Keeps a bear's Bash out of the
@@ -1368,6 +1373,9 @@ struct CombatTargetsState
     // The group has more than 15 members (a 40-man raid): adds appear faster than
     // the tanks can build threat on them, so trash is never held for threat.
     bool                    big_raid = false;
+    // The bot's group is a raid group (wherever it stands). A raid in the open world (a world boss, the support scorecard) plays by the raid
+    // rules the instance maps get: threat discipline and the healers' mana-efficiency rules.
+    bool                    raid_group = false;
     // Hostile ground-effect zones around the bot (see GroundHazard).
     std::vector<GroundHazard> ground_hazards;
     // LoS to each live same-map group tank (see TankLos).
@@ -1379,6 +1387,7 @@ struct CombatTargetsState
         tank_los.clear();
         group_tank = ObjectGuid::Empty;
         big_raid = false;
+        raid_group = false;
         victim = ObjectGuid::Empty;
         current_target = ObjectGuid::Empty;
         current_target_hostile = false;
