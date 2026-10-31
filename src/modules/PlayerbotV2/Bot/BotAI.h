@@ -3173,6 +3173,9 @@ public:
         return walk_stall_strikes_;
     }
     void walk_stall_reset() { walk_stall_since_ms_ = 0; walk_stall_strikes_ = 0; }
+    // Local (M7): Playerbot.World.StuckHearth. Set by WedgeWatchdog on the world thread, taken by the idle watch on the bot's worker.
+    void request_stuck_hearth() { stuck_hearth_wanted_.store(true, std::memory_order_relaxed); }
+    bool take_stuck_hearth() { return stuck_hearth_wanted_.exchange(false, std::memory_order_relaxed); }
     // Call once per tick while an in-scan offer giver is being close-approached.
     // Returns true when no offer has been accepted (count never dropped) for
     // futility_ms — the caller sets a back-off and yields.
@@ -4976,6 +4979,7 @@ private:
     float  walk_stall_x_                  = 0.f;
     float  walk_stall_y_                  = 0.f;
     uint8  walk_stall_strikes_            = 0;  // consecutive no-progress windows (drives escape deflection)
+    std::atomic<bool> stuck_hearth_wanted_{false};  // local (M7)
     uint8  crit_repair_best_dura_pct_     = 0;  // best lowest-durability seen at the vendor this episode
     uint32 crit_repair_episode_since_ms_  = 0;  // first tick of THIS critical_repair episode (any sub-state)
     uint8  crit_repair_episode_best_dura_ = 0;  // best lowest-durability seen this episode (walk-futility)

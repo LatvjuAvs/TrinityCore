@@ -20736,6 +20736,24 @@ void DispatchIdle(BotAI& ai,
         // The watch's own forced walk overwrites the last rule; keep the one before it, which is what held the bot.
         if (char const* lr = ai.last_rule_fired(); lr && std::strcmp(lr, "idle:watch_walk") != 0)
             w.prev_rule = lr;
+        // Local (M7): Playerbot.World.StuckHearth, 15 minutes within 150 y with no XP, quest, gold, skill or item (WedgeWatchdog). Like a
+        // stuck player it uses its hearthstone, with the stone's own cooldown; no use when it already stands at home. Water is no
+        // reason to stay: the canal pockets are water.
+        if (ai.take_stuck_hearth() && !::Playerbot::Pool::IsScenarioBot(s.guid().GetCounter()) && !s.has_owner_character()
+            && !(s.in_group() && !::Playerbot::V2::QuestParty::IsMember(s.guid().GetCounter()))
+            && !s.is_mounted() && !s.in_combat() && !s.is_casting() && s.can_hearth()
+            && (s.map_id() != s.raw().travel.homebind_map_id
+                || std::hypot(px - s.raw().travel.homebind_x, py - s.raw().travel.homebind_y) > 150.f)
+            && emit.hearth())
+        {
+            w.hearthing = true;
+            w.has_target = true;
+            w.forced_until_ms = now + V2::kIdleHearthHoldMs;
+            TC_LOG_INFO("playerbot.v2", "[stuck_hearth] bot={} lvl={} map={} zone={} pos=({:.0f},{:.0f},{:.0f}) no progress, hearths home (last_rule={})",
+                s.name(), uint32(s.level()), s.map_id(), s.zone_id(), px, py, pz, w.prev_rule ? w.prev_rule : "-");
+            ai.set_last_rule_fired("idle:stuck_hearth");
+            return;
+        }
         if (V2::IdleStuck(w, px, py, now, exempt))
         {
             // Found standing again and again while the quest approach (it only runs more than 80 y from the goal) was the last thing

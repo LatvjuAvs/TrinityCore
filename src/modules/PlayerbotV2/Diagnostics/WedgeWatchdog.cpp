@@ -9,6 +9,7 @@
 #include "../Threading/SnapshotPublisher.h"
 
 #include "CharacterCache.h"
+#include "Config.h"
 #include "ObjectGuid.h"
 #include "Log.h"
 #include "DatabaseEnv.h"   // #7 ledger: CharacterDatabase upsert
@@ -345,6 +346,10 @@ void WedgeWatchdog::Tick(uint32 now_ms)
                 snap->vitals.in_combat ||
                 snap->cast.is_casting;
             np_candidate = m_noProgressEnabled && !np_exempt && np_stuck_for >= np_window;
+            // Local (M7): the idle watch hearths a bot only when it stands in one spot, and the unstick ladder's count restarts on every
+            // goal change, so a bot pacing a mesh pocket reached neither (Stormwind canal: 2,835 s, on again after each restart).
+            if (np_candidate && sConfigMgr->GetBoolDefault("Playerbot.World.StuckHearth", false, true))
+                ai.request_stuck_hearth();
             if (np_candidate)
             {
                 np_wi.bot         = id;
