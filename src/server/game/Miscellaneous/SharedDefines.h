@@ -111,7 +111,7 @@ constexpr uint32 GetMaxLevelForExpansion(uint32 expansion)
     switch (expansion)
     {
         case EXPANSION_CLASSIC:
-            return 60;                  // Classic 1.60: vanilla level cap (the official beta stops at 30, release goes to 60)
+            return 60; // local: the realm runs at level 60 (upstream Forever beta caps Classic at 30)
         case EXPANSION_THE_BURNING_CRUSADE:
             return 30;
         case EXPANSION_WRATH_OF_THE_LICH_KING:

@@ -64,6 +64,8 @@
 #include "TradeData.h"
 #include "TraitPackets.h"
 #include "TransmogMgr.h"
+#include <mutex>
+#include <unordered_set>
 #include "UniqueTrackablePtr.h"
 #include "Util.h"
 #include "VMapFactory.h"
@@ -2965,6 +2967,8 @@ void Spell::TargetInfo::DoDamageAndTriggers(Spell* spell)
                 }
                 spell->m_damage = damageInfo.damage;
 
+                sScriptMgr->OnHitOutcome(caster, spell->unitTarget, spell->m_spellInfo->Id,
+                    IsCrit ? HIT_OUTCOME_CRIT : MissCondition == SPELL_MISS_BLOCK ? HIT_OUTCOME_BLOCK : HIT_OUTCOME_HIT, damageInfo.damage);
                 caster->DealSpellDamage(&damageInfo, true);
 
                 // Send log damage message to client
@@ -2985,6 +2989,11 @@ void Spell::TargetInfo::DoDamageAndTriggers(Spell* spell)
             // Fill base damage struct (unitTarget - is real spell target)
             SpellNonMeleeDamage damageInfo(caster, spell->unitTarget, spell->m_spellInfo, spell->m_SpellVisual, spell->m_spellSchoolMask);
             ProcHitMask |= createProcHitMask(&damageInfo, MissCondition);
+            // A hostile spell that missed, was dodged, parried or resisted
+            if (MissCondition == SPELL_MISS_MISS || MissCondition == SPELL_MISS_DODGE || MissCondition == SPELL_MISS_PARRY || MissCondition == SPELL_MISS_RESIST)
+                sScriptMgr->OnHitOutcome(caster, spell->unitTarget, spell->m_spellInfo->Id,
+                    MissCondition == SPELL_MISS_MISS ? HIT_OUTCOME_MISS : MissCondition == SPELL_MISS_DODGE ? HIT_OUTCOME_DODGE
+                    : MissCondition == SPELL_MISS_PARRY ? HIT_OUTCOME_PARRY : HIT_OUTCOME_RESIST, 0);
             // Do triggers for unit
             if (canEffectTrigger)
             {
@@ -7515,20 +7524,25 @@ bool Spell::CanIncreaseRangeByMovement(Unit const* unit)
 
 SpellRange Spell::GetMinMaxRange(bool strict) const
 {
+    return CalcMinMaxRange(m_caster, m_targets.GetUnitTarget(), m_targets.GetCorpseTarget() != nullptr, m_spellInfo, strict, const_cast<Spell*>(this));
+}
+
+// The numbers CheckRange tests, available before any Spell exists (a bot picks its standing spot from the same minimum the cast will be held to)
+SpellRange Spell::CalcMinMaxRange(WorldObject const* caster, Unit const* target, bool corpseTarget, SpellInfo const* spellInfo, bool strict, Spell* spell /*= nullptr*/)
+{
     float rangeMod = 0.0f;
     SpellRange range;
 
-    if (strict && m_spellInfo->IsNextMeleeSwingSpell())
+    if (strict && spellInfo->IsNextMeleeSwingSpell())
     {
         range = { .Min = 0.0f, .Max = 100.0f };
         return range;
     }
 
-    Unit* unitCaster = m_caster->ToUnit();
-    if (m_spellInfo->RangeEntry)
+    Unit const* unitCaster = caster->ToUnit();
+    if (spellInfo->RangeEntry)
     {
-        Unit* target = m_targets.GetUnitTarget();
-        if (m_spellInfo->RangeEntry->Flags & SPELL_RANGE_MELEE)
+        if (spellInfo->RangeEntry->Flags & SPELL_RANGE_MELEE)
         {
             // when the target is not a unit, take the caster's combat reach as the target's combat reach.
             if (unitCaster)
@@ -7537,36 +7551,36 @@ SpellRange Spell::GetMinMaxRange(bool strict) const
         else
         {
             float meleeRange = 0.0f;
-            if (m_spellInfo->RangeEntry->Flags & SPELL_RANGE_RANGED)
+            if (spellInfo->RangeEntry->Flags & SPELL_RANGE_RANGED)
             {
                 // when the target is not a unit, take the caster's combat reach as the target's combat reach.
                 if (unitCaster)
                     meleeRange = unitCaster->GetMeleeRange(target ? target : unitCaster);
             }
 
-            range = m_caster->GetSpellMinMaxRangeForTarget(target, m_spellInfo);
+            range = caster->GetSpellMinMaxRangeForTarget(target, spellInfo);
             range.Min += meleeRange;
 
-            if (target || m_targets.GetCorpseTarget())
+            if (target || corpseTarget)
             {
-                rangeMod = m_caster->GetCombatReach() + (target ? target->GetCombatReach() : m_caster->GetCombatReach());
+                rangeMod = caster->GetCombatReach() + (target ? target->GetCombatReach() : caster->GetCombatReach());
 
-                if (range.Min > 0.0f && !(m_spellInfo->RangeEntry->Flags & SPELL_RANGE_RANGED))
+                if (range.Min > 0.0f && !(spellInfo->RangeEntry->Flags & SPELL_RANGE_RANGED))
                     range.Min += rangeMod;
             }
         }
 
         if (target && unitCaster && CanIncreaseRangeByMovement(target) && CanIncreaseRangeByMovement(unitCaster) &&
-            ((m_spellInfo->RangeEntry->Flags & SPELL_RANGE_MELEE) || target->GetTypeId() == TYPEID_PLAYER))
+            ((spellInfo->RangeEntry->Flags & SPELL_RANGE_MELEE) || target->GetTypeId() == TYPEID_PLAYER))
             rangeMod += 8.0f / 3.0f;
     }
 
-    if (m_spellInfo->HasAttribute(SPELL_ATTR0_USES_RANGED_SLOT) && m_caster->GetTypeId() == TYPEID_PLAYER)
-        if (Item* ranged = m_caster->ToPlayer()->GetWeaponForAttack(RANGED_ATTACK, true))
+    if (spellInfo->HasAttribute(SPELL_ATTR0_USES_RANGED_SLOT) && caster->GetTypeId() == TYPEID_PLAYER)
+        if (Item* ranged = caster->ToPlayer()->GetWeaponForAttack(RANGED_ATTACK, true))
             range.Max *= ranged->GetTemplate()->GetRangedModRange() * 0.01f;
 
-    if (Player* modOwner = m_caster->GetSpellModOwner())
-        modOwner->ApplySpellMod(m_spellInfo, SpellModOp::Range, range.Max, const_cast<Spell*>(this));
+    if (Player* modOwner = caster->GetSpellModOwner())
+        modOwner->ApplySpellMod(spellInfo, SpellModOp::Range, range.Max, spell);
 
     range.Max += rangeMod;
 
@@ -8762,7 +8776,27 @@ void Spell::PreprocessSpellLaunch(TargetInfo& targetInfo)
     {
         if (!critChance)
             critChance = m_originalCaster->SpellCritChanceDone(this, nullptr, m_spellSchoolMask, m_attackType);
+        float const critDone = critChance;
         critChance = unit->SpellCritChanceTaken(m_originalCaster, this, nullptr, m_spellSchoolMask, critChance, m_attackType);
+        // A player's ability that crits at least half the time: name what gives the chance, once per spell (damage_parity 146: Sinister
+        // Strike and Backstab crit 97-100 % of landed hits while white swings crit 24 %).
+        if (critChance >= 50.0f && m_originalCaster->GetTypeId() == TYPEID_PLAYER)
+        {
+            static std::mutex certainCritMutex;
+            static std::unordered_set<uint32> certainCritLogged;
+            std::lock_guard<std::mutex> lock(certainCritMutex);
+            if (certainCritLogged.insert(m_spellInfo->Id).second)
+            {
+                std::string mods;
+                for (AuraType type : { SPELL_AURA_ADD_FLAT_MODIFIER, SPELL_AURA_ADD_PCT_MODIFIER, SPELL_AURA_ADD_FLAT_MODIFIER_BY_SPELL_LABEL, SPELL_AURA_ADD_PCT_MODIFIER_BY_SPELL_LABEL })
+                    for (AuraEffect const* eff : m_originalCaster->GetAuraEffectsByType(type))
+                        if (eff->GetMiscValue() == int32(SpellModOp::CritChance) && eff->IsAffectingSpell(m_spellInfo))
+                            mods += fmt::format(" {}({}) type {}: {}", eff->GetId(), eff->GetSpellInfo()->SpellName ? (*eff->GetSpellInfo()->SpellName)[sWorld->GetDefaultDbcLocale()] : "", int(type), eff->GetAmount());
+                TC_LOG_INFO("playerbot.v2", "[certain_crit] spell {} ({}) crit chance {:.1f}% (before the target's auras {:.1f}%, character sheet {:.1f}%, spell value {:.1f}%) spell mods:{}", m_spellInfo->Id,
+                    m_spellInfo->SpellName ? (*m_spellInfo->SpellName)[sWorld->GetDefaultDbcLocale()] : "", critChance, critDone,
+                    m_originalCaster->GetUnitCriticalChanceDone(m_attackType), m_spellValue->CriticalChance, mods.empty() ? " none" : mods);
+            }
+        }
     }
 
     targetInfo.IsCrit = roll_chance(critChance);

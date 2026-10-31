@@ -887,7 +887,7 @@ void BattlegroundQueue::BattlegroundQueueUpdate(uint32 /*diff*/, BattlegroundBra
             });
 
     // PlayerbotV2: the queued fill goes to the battleground a real player is in or has been invited to first, not to the
-    // oldest half-empty instance (Karrz, WSG 2026-10-09: his side filled only in the last half minute of the prep timer
+    // oldest half-empty instance (playtest, WSG 2026-10-09: his side filled only in the last half minute of the prep timer
     // because the bots spread over older instances). Instances with a human come first, the order is otherwise kept.
     // Only when bots take part (queued, or inside one of the instances).
     std::vector<uint32> human_instances;

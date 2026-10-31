@@ -970,6 +970,19 @@ void Player::Update(uint32 p_time)
             m_petResummonDelay -= p_time;
     }
 
+    // A bot has no client to send CMSG_SET_SHEATHED: after a kill it keeps its bow or weapon drawn and stands in the aim pose.
+    // A moment with no fight and no victim puts the weapons away, as a player's client does.
+    if (GetSession()->IsBot())
+    {
+        if (GetSheath() == SHEATH_STATE_UNARMED || IsInCombat() || GetVictim() || !IsAlive())
+            m_botSheathIdleMs = 0;
+        else if ((m_botSheathIdleMs += p_time) >= 3000)
+        {
+            m_botSheathIdleMs = 0;
+            SetSheath(SHEATH_STATE_UNARMED);
+        }
+    }
+
     DeathRecap::RecordFrame(this, p_time);
     DeathRecap::UpdateViewer(this);
 
@@ -2971,6 +2984,15 @@ bool Player::AddSpell(uint32 spellId, bool active, bool learning, bool dependent
             if (!IsInWorld() && !learning)                   // explicitly load from DB and then exist in it already and set correctly
                 itr->second.state = PLAYERSPELL_UNCHANGED;
 
+            // a spell loaded from character_spell carries no trait; the trait config applied at login names it, so link it here instead of dropping it with the early return
+            if (trait && itr->second.Trait != trait)
+            {
+                itr->second.Trait = trait;
+                if (TraitDefinitionEntry const* traitDefinition = sTraitDefinitionStore.LookupEntry(trait->DefinitionId))
+                    if (traitDefinition->OverridesSpellID)
+                        AddOverrideSpell(traitDefinition->OverridesSpellID, spellId);
+            }
+
             return false;
         }
 
@@ -2983,7 +3005,8 @@ bool Player::AddSpell(uint32 spellId, bool active, bool learning, bool dependent
             dependent_set = true;
         }
 
-        if (itr->second.Trait != trait)
+        // a learn that names no trait (a trainer teaching a former talent such as Mortal Strike) must not drop the link a talent purchase gave it
+        if (trait && itr->second.Trait != trait)
         {
             if (itr->second.Trait)
                 if (TraitDefinitionEntry const* traitDefinition = sTraitDefinitionStore.LookupEntry(itr->second.Trait->DefinitionId))
@@ -5603,7 +5626,8 @@ float Player::ApplyRatingDiminishing(CombatRating cr, float bonusValue) const
 
 float Player::GetExpertiseDodgeOrParryReduction(WeaponAttackType attType) const
 {
-    float baseExpertise = 7.5f;
+    // Classic 1.60 (vanilla): no innate expertise, creatures keep their full 5% dodge and parry (retail players start at 7.5%)
+    float baseExpertise = 0.0f;
     switch (attType)
     {
         case BASE_ATTACK:
@@ -9378,6 +9402,31 @@ void Player::CastItemCombatSpell(DamageInfo const& damageInfo, Item* item, ItemT
         SpellItemEnchantmentEntry const* pEnchant = sSpellItemEnchantmentStore.LookupEntry(enchant_id);
         if (!pEnchant)
             continue;
+
+        // Windfury Weapon (vMaNGOS, Player::CastItemCombatSpell): 20% on a melee hit to gain the rank's Windfury Attack, which adds the extra
+        // attack and the attack power for it; never on the extra attack itself. Done here on the imbue's enchantment, not through the
+        // enchantment's own spell, which Forever points at a dummy aura (Windfury Weapon 439431) with no script.
+        if (e_slot == TEMP_ENCHANTMENT_SLOT)
+        {
+            uint32 windfuryAttack = 0;
+            switch (enchant_id)
+            {
+                case 283:  windfuryAttack = 8233;  break;   // Windfury Weapon rank 1 (spell 8232)
+                case 284:  windfuryAttack = 8236;  break;   // rank 2 (8235)
+                case 525:  windfuryAttack = 10484; break;   // rank 3 (10486)
+                case 1669: windfuryAttack = 16361; break;   // rank 4 (16362)
+                default: break;
+            }
+            if (windfuryAttack)
+            {
+                if (canTrigger && !GetLastExtraAttackSpell())
+                    CombatEnchantProc::Dispatch(20.0f, [](float procChance) { return roll_chance(procChance); }, [&]
+                    {
+                        CastSpell(this, windfuryAttack, CastSpellExtraArgs(item));
+                    });
+                continue;
+            }
+        }
 
         for (uint8 s = 0; s < MAX_ITEM_ENCHANTMENT_EFFECTS; ++s)
         {
@@ -27354,7 +27403,11 @@ void Player::InitializeSelfResurrectionSpells()
     for (AuraEffectList::const_iterator itr = dummyAuras.begin(); itr != dummyAuras.end(); ++itr)
     {
         // Soulstone Resurrection                           // prio: 3 (max, non death persistent)
-        if ((*itr)->GetSpellInfo()->SpellFamilyName == SPELLFAMILY_WARLOCK && (*itr)->GetSpellInfo()->SpellFamilyFlags[1] & 0x1000000)
+        // Classic 1.60 (VMaNGOS Player.cpp): the passive ranks 20707, 20762..20765. The retail family flag (0x1000000) is not on them; the client
+        // data has 0x4000000 in the second mask, so the flag check never matched and a Soulstone never resurrected.
+        uint32 const dummyId = (*itr)->GetId();
+        if (dummyId == 20707 || (dummyId >= 20762 && dummyId <= 20765)
+            || ((*itr)->GetSpellInfo()->SpellFamilyName == SPELLFAMILY_WARLOCK && (*itr)->GetSpellInfo()->SpellFamilyFlags[1] & 0x1000000))
             spells[0] = 3026;
         // Twisting Nether                                  // prio: 2 (max)
         else if ((*itr)->GetId() == 23701 && roll_chance(10))
@@ -28276,6 +28329,8 @@ void Player::StoreLootItem(ObjectGuid lootWorldObjectGuid, uint8 lootSlot, Loot*
                 return;
             }
 
+            loot->LogGiven(GetMap(), GetName().c_str(), *item,
+                !item->rollWinnerGUID.IsEmpty() ? "roll winner takes it" : loot->GetLootMethod() == MASTER_LOOT ? "master loot, taken" : "looted");
             Item* newitem = StoreNewItem(dest, item->itemid, true, item->randomBonusListId, item->GetAllowedLooters(), item->context);
             if (newitem)
                 sScriptMgr->OnPlayerLootItem(this, newitem);

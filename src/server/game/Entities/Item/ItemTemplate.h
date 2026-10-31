@@ -962,6 +962,7 @@ struct TC_GAME_API ItemTemplate
             case ITEM_SUBCLASS_WEAPON_GUN:
             case ITEM_SUBCLASS_WEAPON_CROSSBOW:
             case ITEM_SUBCLASS_WEAPON_WAND:
+            case ITEM_SUBCLASS_WEAPON_THROWN:   // Classic 1.60: thrown weapons sit in the ranged slot and feed Throw (2764)
                 return true;
             default:
                 break;

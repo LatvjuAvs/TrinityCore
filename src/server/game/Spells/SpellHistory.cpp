@@ -495,6 +495,25 @@ void SpellHistory::StartCooldown(SpellInfo const* spellInfo, uint32 itemId, Spel
         if (categoryCooldown < Duration::zero())
             categoryCooldown = Duration::zero();
 
+        // Classic 1.60: the client starts the cooldown of its own data (Forever's Drain Life 15 s) when the spell goes off and only the server's packet
+        // corrects it. A cooldown the classic tables changed is therefore always told to the client: cleared when there is none, else sent in full.
+        if (spellInfo->ClassicCooldownOverridden && !forcedCooldown)
+        {
+            if (cooldown == Duration::zero() && categoryCooldown == Duration::zero())
+            {
+                if (Player* playerOwner = GetPlayerOwner())
+                {
+                    WorldPackets::Spells::ClearCooldown clearCooldown;
+                    clearCooldown.IsPet = _owner != playerOwner;
+                    clearCooldown.SpellID = spellInfo->Id;
+                    clearCooldown.ClearOnHold = false;
+                    playerOwner->SendDirectMessage(clearCooldown.Write());
+                }
+            }
+            else
+                needsCooldownPacket = true;
+        }
+
         // no cooldown after applying spell mods
         if (cooldown == Duration::zero() && categoryCooldown == Duration::zero())
             return;
@@ -516,7 +535,8 @@ void SpellHistory::StartCooldown(SpellInfo const* spellInfo, uint32 itemId, Spel
                 WorldPackets::Spells::SpellCooldown spellCooldown;
                 spellCooldown.Caster = _owner->GetGUID();
                 spellCooldown.Flags = SPELL_COOLDOWN_FLAG_NONE;
-                spellCooldown.SpellCooldowns.emplace_back(spellInfo->Id, uint32(cooldown.count()));
+                // the cooldown the entry above really runs for: its own, else the category's (a category-only classic cooldown would send 0)
+                spellCooldown.SpellCooldowns.emplace_back(spellInfo->Id, uint32(duration_cast<Milliseconds>(recTime - curTime).count()));
                 playerOwner->SendDirectMessage(spellCooldown.Write());
             }
         }

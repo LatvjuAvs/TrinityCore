@@ -631,7 +631,7 @@ NonDefaultConstructible<pAuraEffectHandler> AuraEffectHandler[TOTAL_AURAS]=
     &AuraEffect::HandleNULL,                                      //559
     &AuraEffect::HandleNULL,                                      //560
     &AuraEffect::HandleNULL,                                      //561
-    &AuraEffect::HandleNULL,                                      //562
+    &AuraEffect::HandleNoImmediateEffect,                         //562 Classic 1.60: Blessing of Sacrifice flat damage split, implemented in Unit::CalcAbsorbResist
     &AuraEffect::HandleNULL,                                      //563
     &AuraEffect::HandleNULL,                                      //564
     &AuraEffect::HandleNULL,                                      //565
@@ -1447,6 +1447,11 @@ bool AuraEffect::CheckEffectProc(AuraApplication* aurApp, ProcEventInfo& eventIn
 
                     // Patch 1.12.0(?) extra attack abilities can no longer chain proc themselves
                     if (lastExtraAttackSpell == triggerSpellId)
+                        return false;
+
+                    // Classic 1.60 (vanilla, VMaNGOS HandleProcTriggerSpell): no extra attack proc at all while the extra attacks of another one
+                    // are pending or running (Windfury cannot start Sword Specialization or Hand of Justice and the reverse), except Reckoning
+                    if (lastExtraAttackSpell && triggerSpellId != 20178)
                         return false;
                 }
             }
@@ -5141,6 +5146,11 @@ void AuraEffect::HandleChannelDeathItem(AuraApplication const* aurApp, uint8 mod
         return;
 
     if (GetSpellEffectInfo().ItemType == 0)
+        return;
+
+    // Warlocks: only one soul shard when Shadowburn and Drain Soul were both on the target (vMaNGOS, GPL-2.0, Aura::HandleChannelDeathItem);
+    // the other aura is still present while the first one is removed, so the second removal grants it
+    if (GetSpellInfo()->SpellFamilyName == SPELLFAMILY_WARLOCK && target->HasAuraTypeWithCaster(SPELL_AURA_CHANNEL_DEATH_ITEM, plCaster->GetGUID()))
         return;
 
     // Soul Shard

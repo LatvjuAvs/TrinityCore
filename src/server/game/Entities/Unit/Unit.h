@@ -627,6 +627,7 @@ enum ReactiveType
 {
     REACTIVE_DEFENSE      = 0,
     REACTIVE_DEFENSE_2    = 1,
+    REACTIVE_OVERPOWER    = 2,
     MAX_REACTIVE
 };
 

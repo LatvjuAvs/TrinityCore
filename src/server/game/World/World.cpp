@@ -1428,6 +1428,8 @@ bool World::SetInitialWorldSettings()
 
     TC_LOG_INFO("server.loading", "Loading classic spell values...");
     sSpellMgr->LoadClassicSpellInfo();
+    sSpellMgr->LoadClassicTwinChannels();
+    sSpellMgr->LoadClassicSpellEffects();
     sSpellMgr->LoadClassicSpellValues();
     sSpellMgr->LoadClassicSpellCosts();
 
