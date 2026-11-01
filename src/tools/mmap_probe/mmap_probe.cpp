@@ -225,7 +225,7 @@ const char* DescribeStatus(dtStatus st, bool partial, bool startFar, bool endFar
         return "FARFROMPOLY_END";
     if (partial)
         return "PARTIAL";
-    if (polys >= 74)
+    if (polys >= 20000)
         return "SHORT";
     if (!reached)
         return "INCOMPLETE";
@@ -254,7 +254,7 @@ int RunQuery(dtNavMesh* navMesh, dtNavMeshQuery* query,
     float extents[3] = { 3.0f, 5.0f, 3.0f };
 
     dtQueryFilter filter;
-    filter.setIncludeFlags(NAV_GROUND | NAV_GROUND_STEEP | NAV_WATER | NAV_ROAD);
+    filter.setIncludeFlags(std::getenv("MMAP_PROBE_NO_WATER") ? (NAV_GROUND | NAV_GROUND_STEEP | NAV_ROAD) : (NAV_GROUND | NAV_GROUND_STEEP | NAV_WATER | NAV_ROAD));   // local: tools/walk_link_check.py walks, it does not swim
     filter.setExcludeFlags(0);
 
     dtPolyRef startRef = 0;
@@ -308,8 +308,8 @@ int RunQuery(dtNavMesh* navMesh, dtNavMeshQuery* query,
         endTC[0], endTC[1], endTC[2],
         endFar ? " [WIDE SEARCH]" : "");
 
-    constexpr int MAX_PATH_LENGTH = 74; // mirror PathGenerator.h
-    dtPolyRef pathPolys[MAX_PATH_LENGTH] = { 0 };
+    static constexpr int MAX_PATH_LENGTH = 20000; // local: long enough for a whole walk (PathGenerator stops at 74)
+    static dtPolyRef pathPolys[MAX_PATH_LENGTH];
     int polyCount = 0;
     s = query->findPath(startRef, endRef, startClosest, endClosest, &filter,
         pathPolys, &polyCount, MAX_PATH_LENGTH);
@@ -329,10 +329,10 @@ int RunQuery(dtNavMesh* navMesh, dtNavMeshQuery* query,
     // Run a straight-path string-pull to get waypoints, so we can check
     // distance from final waypoint to requested dst (in 3D Detour
     // coords) and report the last few points.
-    constexpr int MAX_STRAIGHT_POINTS = MAX_PATH_LENGTH;
-    float straight[MAX_STRAIGHT_POINTS * 3] = { 0 };
-    unsigned char straightFlags[MAX_STRAIGHT_POINTS] = { 0 };
-    dtPolyRef straightRefs[MAX_STRAIGHT_POINTS] = { 0 };
+    static constexpr int MAX_STRAIGHT_POINTS = MAX_PATH_LENGTH;
+    static float straight[MAX_STRAIGHT_POINTS * 3];
+    static unsigned char straightFlags[MAX_STRAIGHT_POINTS];
+    static dtPolyRef straightRefs[MAX_STRAIGHT_POINTS];
     int straightCount = 0;
     dtStatus s2 = query->findStraightPath(startClosest, endClosest, pathPolys, polyCount,
         straight, straightFlags, straightRefs, &straightCount, MAX_STRAIGHT_POINTS, 0);
@@ -469,7 +469,7 @@ int main(int argc, char** argv)
     }
 
     dtNavMeshQuery* query = dtAllocNavMeshQuery();
-    if (!query || dtStatusFailed(query->init(navMesh, 4096)))
+    if (!query || dtStatusFailed(query->init(navMesh, 65535)))
     {
         std::fprintf(stderr, "ERROR: dtNavMeshQuery init failed\n");
         return 2;
