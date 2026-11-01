@@ -65,6 +65,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <map>
+#if TRINITY_PLATFORM == TRINITY_PLATFORM_APPLE
+#include <cstdio>
+#include <execinfo.h>
+#include <mach-o/dyld.h>
+#include <unistd.h>
+#endif
 
 #include "Hacks/boost_program_options_with_filesystem_path.h"
 
@@ -135,10 +141,29 @@ struct ShutdownTCSoapThread { void operator()(std::thread* thread) const; };
 struct ShutdownCLIThread { void operator()(std::thread* cliThread) const; };
 variables_map GetConsoleArguments(int argc, char** argv, fs::path& configFile, fs::path& configDir, std::string& winServiceAction);
 
+#if TRINITY_PLATFORM == TRINITY_PLATFORM_APPLE
+// Local: a crash on this Mac leaves only exit code 139, no report. Write the crashing thread's stack to stderr, then crash as
+// before. Read it with: atos -o worldserver -l <0x100000000 + slide> <addresses>
+static void CrashStackHandler(int sig)
+{
+    signal(sig, SIG_DFL);
+    char line[96];
+    int const len = snprintf(line, sizeof(line), "CRASH signal %d, slide 0x%lx\n", sig, long(_dyld_get_image_vmaddr_slide(0)));
+    (void)!write(STDERR_FILENO, line, len);
+    void* frames[64];
+    backtrace_symbols_fd(frames, backtrace(frames, 64), STDERR_FILENO);
+}
+#endif
+
 /// Launch the Trinity server
 int main(int argc, char** argv)
 {
     signal(SIGABRT, &Trinity::AbortHandler);
+#if TRINITY_PLATFORM == TRINITY_PLATFORM_APPLE
+    signal(SIGSEGV, &CrashStackHandler);
+    signal(SIGBUS, &CrashStackHandler);
+    signal(SIGILL, &CrashStackHandler);
+#endif
 
     Trinity::VerifyOsVersion();
 
