@@ -39,6 +39,7 @@
 #include "../Threading/IntentQueue.h"
 #include "Config.h"
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 
 namespace {
@@ -198,6 +199,32 @@ std::string FactionRaceList(BotGuildMgr::Faction f)
 }
 }  // namespace
 
+namespace {
+// Local (M7): a founder on foot, without a charter yet, that stays within 100 y for 15 minutes has no way to the registrar: someone
+// else gets the slot, and it may be elected again after an hour. Live 2026-11-01: the travel graph has no route from Bloodhoof to
+// Thunder Bluff, and Baderond paced 20 y for 20 minutes. World thread only (Tick and the election).
+struct FounderWalk { uint32 map; float x, y; uint32 since_ms; };
+std::unordered_map<uint64, FounderWalk> g_founder_walk;
+std::unordered_map<uint64, uint32> g_founder_dropped_ms;
+
+bool FounderGotNowhere(Player const* founder, uint32 now_ms)
+{
+    uint64 const low = founder->GetGUID().GetCounter();
+    auto it = g_founder_walk.find(low);
+    if (it == g_founder_walk.end() || it->second.map != founder->GetMapId()
+        || std::hypot(founder->GetPositionX() - it->second.x, founder->GetPositionY() - it->second.y) > 100.0f)
+    {
+        g_founder_walk[low] = { founder->GetMapId(), founder->GetPositionX(), founder->GetPositionY(), now_ms };
+        return false;
+    }
+    if (now_ms - it->second.since_ms < 15u * 60u * 1000u)
+        return false;
+    g_founder_walk.erase(it);
+    g_founder_dropped_ms[low] = now_ms;
+    return true;
+}
+} // namespace
+
 bool BotGuildMgr::CharterOnFoot()
 {
     return sConfigMgr->GetBoolDefault("Playerbot.World.GuildCharterOnFoot", false, true);
@@ -312,6 +339,9 @@ bool BotGuildMgr::EnsureFounderElected(Faction f)
         {
             Player const* cand = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(guid_low));
             if (!cand || !cand->IsInWorld() || cand->GetFreeInventorySlotCount() == 0)
+                continue;
+            auto const dropped = g_founder_dropped_ms.find(guid_low);
+            if (dropped != g_founder_dropped_ms.end() && getMSTime() - dropped->second < 60u * 60u * 1000u)
                 continue;
         }
         chosen_low = guid_low;
@@ -879,6 +909,14 @@ void BotGuildMgr::Tick(uint32 now_ms)
         }
         if (at_ms != 0 && (now_ms - at_ms) > kBudgetMs)
             OnCharterAborted(static_cast<Faction>(fi));
+        else if (on_foot && at_ms != 0)
+            if (Player const* founder = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(founder_low)))
+                if (founder->IsInWorld() && FounderGotNowhere(founder, now_ms))
+                {
+                    TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] founder {} got nowhere in 15 minutes at map {} ({:.0f},{:.0f}): slot released",
+                        founder->GetName(), founder->GetMapId(), founder->GetPositionX(), founder->GetPositionY());
+                    OnCharterAborted(static_cast<Faction>(fi));
+                }
     }
 
     ReturnSigners(now_ms);   // local (M7)

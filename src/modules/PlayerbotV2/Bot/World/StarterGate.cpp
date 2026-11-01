@@ -1,4 +1,5 @@
 #include "StarterGate.h"
+#include "ZonePicker.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "Log.h"
@@ -96,7 +97,13 @@ bool NoHearthBindHere(uint32 zone_id, uint8 level)
 {
     // Stormwind, Ironforge, Darnassus, The Exodar, Undercity, Orgrimmar, Thunder Bluff, Silvermoon City.
     static constexpr std::array<uint32, 8> kCapitals = { 1519, 1537, 1657, 3557, 1497, 1637, 1638, 3487 };
-    return level < 10 && std::find(kCapitals.begin(), kCapitals.end(), zone_id) != kCapitals.end();
+    if (level < 10 && std::find(kCapitals.begin(), kCapitals.end(), zone_id) != kCapitals.end())
+        return true;
+    // Nor in a zone well above the bot, passed through on the way to a quest. Live 2026-10-31: Helineria, level 8, bound in Lakeshire
+    // (Redridge, 15-25) died 18 times in an hour, and DeathLoopRescue sent them back there 6 times.
+    static int32 const margin = sConfigMgr->GetIntDefault("Playerbot.Bot.SoloQuestLevelMargin", 2, true);
+    uint8 lo = 0, hi = 0;
+    return margin >= 0 && ::Playerbot::V2::World::VanillaZoneLevelRange(zone_id, lo, hi) && int32(lo) > int32(level) + margin;
 }
 
 bool QuestTooHardForBot(Player const* bot, Quest const* quest)

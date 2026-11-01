@@ -175,7 +175,7 @@ bool CharterDriveFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
             // Throttle to once / 5s per bot — without throttle this fires
             // every tick while phase 0 is stuck and floods the log.
             static thread_local uint32 s_last_log = 0;
-            if (now_ms - s_last_log > 5000)
+            if (!on_foot && now_ms - s_last_log > 5000)   // local (M7): on foot this is the normal walk, not a stuck founder
             {
                 s_last_log = now_ms;
                 TC_LOG_WARN("playerbot.v2",
