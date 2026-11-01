@@ -198,6 +198,16 @@ std::string FactionRaceList(BotGuildMgr::Faction f)
 }
 }  // namespace
 
+bool BotGuildMgr::CharterOnFoot()
+{
+    return sConfigMgr->GetBoolDefault("Playerbot.World.GuildCharterOnFoot", false, true);
+}
+
+uint32 BotGuildMgr::CharterBudgetMs()
+{
+    return (CharterOnFoot() ? 6u * 60u : 30u) * 60u * 1000u;
+}
+
 bool BotGuildMgr::EnsureFounderElected(Faction f)
 {
     if (f >= FACTION_COUNT) return false;
@@ -297,6 +307,13 @@ bool BotGuildMgr::EnsureFounderElected(Faction f)
         const Team   team     = Player::TeamForRace(race);
         const Faction fac     = (team == ALLIANCE) ? FACTION_ALLIANCE : FACTION_HORDE;
         if (fac != f) continue;
+        // Local (M7): a full bag ends the charter at the registrar (phase2_bag_full), which on foot is after the whole walk.
+        if (CharterOnFoot())
+        {
+            Player const* cand = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(guid_low));
+            if (!cand || !cand->IsInWorld() || cand->GetFreeInventorySlotCount() == 0)
+                continue;
+        }
         chosen_low = guid_low;
         break;
     } while (result->NextRow());
@@ -344,7 +361,8 @@ bool BotGuildMgr::EnsureFounderElected(Faction f)
     //    Co-locating 5 bots on the plaza also satisfies the signer
     //    branch (CharterSignFire requires founder within 30y of signer).
     // Local (M7): the charter stays, bought and signed (it worked in play 2026-10-21, 7 minutes a guild); FoundGuildDirectly is a freebie.
-    TeleportFounderAndSigners(chosen_low, f);
+    if (!CharterOnFoot())
+        TeleportFounderAndSigners(chosen_low, f);
     return true;
 }
 
@@ -451,15 +469,16 @@ bool BotGuildMgr::AdoptHeldCharter(Faction f)
             active_founder_at_ms_[f] = getMSTime();
             active_founder_petition_low_[f] = petition_low;
         }
-        if (BotAI* ai = Services::Registry().ai(owner_low))
-            ai->arm_charter_grace(getMSTime());
+        if (!CharterOnFoot())
+            if (BotAI* ai = Services::Registry().ai(owner_low))
+                ai->arm_charter_grace(getMSTime());
         uint32 const have = ActiveFounderSignatureCount(f);
         TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] Adopted the charter '{}' held by {} (guid_low={}, faction={}, {} signatures)",
             name, owner->GetName(), owner_low, static_cast<uint32>(f), have);
         // A charter that only needs turning in goes to the guild master plaza, as upstream sends an elected founder: the walk
         // restarts after every restart (live 2026-10-21: Pandoris held 5 signatures for 2 hours, walking from Durotar by way
         // of the Crossroads flight, and never arrived).
-        if (have >= uint32(sConfigMgr->GetIntDefault("MinPetitionSigns", 4, true)) && !owner->IsInCombat())
+        if (!CharterOnFoot() && have >= uint32(sConfigMgr->GetIntDefault("MinPetitionSigns", 4, true)) && !owner->IsInCombat())
         {
             auto const spot = (f == FACTION_ALLIANCE) ? kPetitionerAlliance : kPetitionerHorde;
             Playerbot::BotMovement::SafeTeleport(owner, WorldLocation(spot.map_id, Position(spot.x, spot.y, spot.z, 0.f)), 0);
@@ -598,6 +617,8 @@ void BotGuildMgr::OnCharterSucceeded(Faction f, uint64 founder_low,
             rival_low = active_by_faction_[f].front();
     }
 
+    // Local (M7): REPLACE, since a wipe of `guild` restarts its ids while old rows here stay; the INSERT failed and the guild kept
+    // a dead world's faction and founder (live 2026-11-01: 12 rows from 2026-10-21, Orgrimmar Reavers listed as Alliance).
     // Insert into bot_guild_meta + refresh cache + clear founder slot
     // + release name from pool (the row will move from
     // bot_guild_name_reserved to the implicit "in use" set tracked by
@@ -606,14 +627,14 @@ void BotGuildMgr::OnCharterSucceeded(Faction f, uint64 founder_low,
     if (rival_low != 0)
     {
         CharacterDatabase.DirectPExecute(
-            "INSERT INTO bot_guild_meta (guild_id, faction, founder_low, rival_low, member_cap, theme) "
+            "REPLACE INTO bot_guild_meta (guild_id, faction, founder_low, rival_low, member_cap, theme) "
             "VALUES ({}, {}, {}, {}, {}, 'adventurers')",
             guild_id, static_cast<uint32>(f), founder_low, rival_low, max_members_per_guild_);
     }
     else
     {
         CharacterDatabase.DirectPExecute(
-            "INSERT INTO bot_guild_meta (guild_id, faction, founder_low, member_cap, theme) "
+            "REPLACE INTO bot_guild_meta (guild_id, faction, founder_low, member_cap, theme) "
             "VALUES ({}, {}, {}, {}, 'adventurers')",
             guild_id, static_cast<uint32>(f), founder_low, max_members_per_guild_);
     }
@@ -837,13 +858,24 @@ void BotGuildMgr::Tick(uint32 now_ms)
     // Abort founders whose FSM exceeded the 30-min budget — the bot
     // may have logged out or hit an unrecoverable wedge. Phase A.2 of
     // the FSM checks budget itself; this is the manager-side safety.
-    constexpr uint32 kBudgetMs = 30u * 60u * 1000u;
+    uint32 const kBudgetMs = CharterBudgetMs();
+    bool const on_foot = CharterOnFoot();   // local (M7)
     for (uint8 fi = 0; fi < FACTION_COUNT; ++fi)
     {
         uint32 at_ms = 0;
+        uint64 founder_low = 0, petition_low = 0;
         {
             std::lock_guard<std::mutex> g(mtx_);
             at_ms = active_founder_at_ms_[fi];
+            founder_low = active_founder_low_[fi];
+            petition_low = active_founder_petition_low_[fi];
+        }
+        // Local (M7): on foot a charter takes as long as meeting people takes, but a holder that logged out frees the slot.
+        if (on_foot && petition_low)
+        {
+            if (!ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(founder_low)))
+                OnCharterAborted(static_cast<Faction>(fi));
+            continue;
         }
         if (at_ms != 0 && (now_ms - at_ms) > kBudgetMs)
             OnCharterAborted(static_cast<Faction>(fi));
@@ -852,7 +884,7 @@ void BotGuildMgr::Tick(uint32 now_ms)
     ReturnSigners(now_ms);   // local (M7)
 
     // Local (M7): signers for a charter the founder holds (see PullSignersToFounder).
-    for (uint8 fi = 0; fi < FACTION_COUNT && fi < 2; ++fi)
+    for (uint8 fi = 0; fi < FACTION_COUNT && fi < 2 && !on_foot; ++fi)
     {
         Faction const f = static_cast<Faction>(fi);
         uint64 const founder_low = ActiveFounderLow(f);
@@ -869,7 +901,7 @@ void BotGuildMgr::Tick(uint32 now_ms)
         PullSignersToFounder(founder, f, required - have);
     }
     // Sweep stale name reservations (60-min cutoff = 2× FSM budget).
-    if (g_name_pool) g_name_pool->SweepStale(60u * 60u);
+    if (g_name_pool) g_name_pool->SweepStale(on_foot ? 48u * 60u * 60u : 60u * 60u);
 
     // Elect founders for any faction with open slots and none active.
     for (uint8 fi = 0; fi < FACTION_COUNT; ++fi)

@@ -123,10 +123,13 @@ bool CharterDriveFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
     uint8 phase = ai.guild_charter_phase();
 
     // Abort FSM if we exceeded the 30-min budget.
-    if (phase != 0 && phase != 0xFF && phase != 0xFE)
+    // Local (M7): on foot the budget is longer, and a founder holding a charter has none (see BotGuildMgr::CharterOnFoot).
+    bool const on_foot = ::Playerbot::V2::BotGuildMgr::CharterOnFoot();
+    if (phase != 0 && phase != 0xFF && phase != 0xFE
+        && !(on_foot && Services::Guilds().ActiveFounderPetitionLow(kFaction)))
     {
         if (now_ms - ai.guild_charter_started_ms()
-            > ::Playerbot::BotAI::kGuildCharterBudgetMs)
+            > (on_foot ? ::Playerbot::V2::BotGuildMgr::CharterBudgetMs() : ::Playerbot::BotAI::kGuildCharterBudgetMs))
         {
             TC_LOG_WARN("playerbot.v2",
                 "[CharterDrive] abort reason=budget_30min faction={} phase={} "
@@ -317,6 +320,8 @@ bool CharterDriveFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView con
                 ai.set_last_rule_fired("idle:guild_charter_drive:advance_to_submit");
                 return true;
             }
+            if (on_foot)
+                return false;   // local (M7): it goes on with its life, and bots it meets sign (idle:guild_charter_sign)
             constexpr uint32 kPhase3MaxMs = 20u * 60u * 1000u;
             if (now_ms - ai.guild_charter_started_ms() > kPhase3MaxMs)
             {

@@ -168,6 +168,10 @@ public:
     // 30-min budget every cycle.
     bool AdoptHeldCharter(Faction f);   // local (M7)
     void TeleportFounderAndSigners(uint64 founder_low, Faction f);
+    // Local (M7): Playerbot.World.GuildCharterOnFoot. No teleports: the founder walks to the registrar, buys the charter, goes
+    // on with its life, and guildless bots it meets sign; with all signatures it walks back to turn it in.
+    static bool CharterOnFoot();
+    static uint32 CharterBudgetMs();   // for a founder without a charter yet; a holder on foot has no time limit
     // Founds the elected founder's guild at once: the guild is created with the founder as leader and online, guildless bots of the same
     // faction as its first members, with no petition walk. Returns false (the election is released) when it cannot be done.
     bool FoundGuildDirectly(uint64 founder_low, Faction f, std::string const& name);
