@@ -570,12 +570,18 @@ struct IntentVisitor
                 if (!npc) return Result::InvalidTarget;
                 uint64 charter_low = 0;
                 const auto r = V2::BotBuyGuildCharter(bot, npc, op.guild_name, charter_low);
-                if (r != V2::CharterBuyResult::Ok)
-                    return Result::ServerRefused;
-                if (BotAI* ai = Services::Registry().ai(bot->GetGUID().GetCounter()))
-                    ai->set_guild_charter_petition_low(charter_low);
                 const auto faction = (Player::TeamForRace(bot->GetRace()) == ALLIANCE)
                     ? V2::BotGuildMgr::FACTION_ALLIANCE : V2::BotGuildMgr::FACTION_HORDE;
+                if (r != V2::CharterBuyResult::Ok)
+                {
+                    // Local (M7): the rule has already moved on to "collect signatures"; without a charter that only holds the faction's slot.
+                    Services::Guilds().OnCharterAborted(faction);
+                    if (BotAI* ai = Services::Registry().ai(bot->GetGUID().GetCounter()))
+                        ai->clear_guild_charter();
+                    return Result::ServerRefused;
+                }
+                if (BotAI* ai = Services::Registry().ai(bot->GetGUID().GetCounter()))
+                    ai->set_guild_charter_petition_low(charter_low);
                 Services::Guilds().SetActiveFounderPetitionLow(faction, charter_low);
                 return Result::Ok;
             }

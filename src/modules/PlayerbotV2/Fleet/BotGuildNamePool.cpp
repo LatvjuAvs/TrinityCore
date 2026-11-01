@@ -5,6 +5,7 @@
 #include "DatabaseEnv.h"
 #include "GuildMgr.h"
 #include "Log.h"
+#include "ObjectMgr.h"
 
 #include <algorithm>
 
@@ -14,16 +15,15 @@ namespace {
 
 // Per-faction static name pools. Mix of theme variations + capital
 // references so a populated server feels like organic guild diversity.
-// Roughly 30 per faction. All names < 24 chars (TC's guild name limit
-// is 24 with most clients; we leave a buffer).
+// Roughly 30 per faction. All names <= 24 chars (TC's guild name limit).
 std::vector<std::string> const kAllianceNames = {
     "Iron Hearts",
     "Stormwind Vanguard",
     "Lionhearts of Azeroth",
-    "Knights of the Silver Hand",
+    "Silver Hand Knights",
     "Westfall Brigade",
     "Wintergrasp Veterans",
-    "Stranglethorn Adventurers",
+    "Stranglethorn Rangers",
     "Eastvale Rangers",
     "Goldshire Regulars",
     "Theramore Loyalists",
@@ -59,7 +59,7 @@ std::vector<std::string> const kHordeNames = {
     "Orgrimmar Reavers",
     "Bloodspear Tribe",
     "Sons of Doomhammer",
-    "Shadowblades of Silvermoon",
+    "Silvermoon Shadowblades",
     "Sindorei Magisters",
     "Darkspear Rebellion",
     "Maghar Outcasts",
@@ -131,6 +131,10 @@ std::string BotGuildNamePool::PickAndReserve(Faction f, uint64 founder_low)
         // sGuildMgr is authoritative — covers both player guilds and
         // bot guilds already in `guild` table from prior sessions).
         if (sGuildMgr->GetGuildByName(candidate))
+            continue;
+
+        // Local (M7): a name the buy would refuse must never be elected. Live 2026-11-01: a 25 letter name held the Alliance slot for 6 hours.
+        if (sObjectMgr->IsReservedName(candidate) || !ObjectMgr::IsValidCharterName(candidate))
             continue;
 
         // Skip if currently reserved by another in-flight charter.
