@@ -907,6 +907,15 @@ void BotGuildMgr::Tick(uint32 now_ms)
                 OnCharterAborted(static_cast<Faction>(fi));
             continue;
         }
+        // Local (M7): nor can a founder that logged out before buying get anywhere. Live 2026-11-02: Danyella left the fleet 40 s after
+        // the election, and the watch below only sees founders in the world, so the slot stayed taken for the whole 6 hour budget.
+        if (on_foot && at_ms != 0 && founder_low
+            && !ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(founder_low)))
+        {
+            TC_LOG_INFO("playerbot.v2", "[BotGuildMgr] founder guid_low={} logged out before buying: slot released", founder_low);
+            OnCharterAborted(static_cast<Faction>(fi));
+            continue;
+        }
         if (at_ms != 0 && (now_ms - at_ms) > kBudgetMs)
             OnCharterAborted(static_cast<Faction>(fi));
         else if (on_foot && at_ms != 0)
