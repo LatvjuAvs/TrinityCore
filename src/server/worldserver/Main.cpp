@@ -143,12 +143,14 @@ variables_map GetConsoleArguments(int argc, char** argv, fs::path& configFile, f
 
 #if TRINITY_PLATFORM == TRINITY_PLATFORM_APPLE
 // Local: a crash on this Mac leaves only exit code 139, no report. Write the crashing thread's stack to stderr, then crash as
-// before. Read it with: atos -o worldserver -l <0x100000000 + slide> <addresses>
-static void CrashStackHandler(int sig)
+// before. Read it with: atos -o worldserver -l <0x100000000 + slide> <addresses>. The stack can skip the faulting function when
+// it is a leaf, so the first line also has its pc and the address it touched.
+static void CrashStackHandler(int sig, siginfo_t* info, void* context)
 {
     signal(sig, SIG_DFL);
-    char line[96];
-    int const len = snprintf(line, sizeof(line), "CRASH signal %d, slide 0x%lx\n", sig, long(_dyld_get_image_vmaddr_slide(0)));
+    char line[128];
+    int const len = snprintf(line, sizeof(line), "CRASH signal %d, slide 0x%lx, pc 0x%llx, address %p\n", sig, long(_dyld_get_image_vmaddr_slide(0)),
+        static_cast<unsigned long long>(__darwin_arm_thread_state64_get_pc(static_cast<ucontext_t*>(context)->uc_mcontext->__ss)), info->si_addr);
     (void)!write(STDERR_FILENO, line, len);
     void* frames[64];
     backtrace_symbols_fd(frames, backtrace(frames, 64), STDERR_FILENO);
@@ -160,9 +162,12 @@ int main(int argc, char** argv)
 {
     signal(SIGABRT, &Trinity::AbortHandler);
 #if TRINITY_PLATFORM == TRINITY_PLATFORM_APPLE
-    signal(SIGSEGV, &CrashStackHandler);
-    signal(SIGBUS, &CrashStackHandler);
-    signal(SIGILL, &CrashStackHandler);
+    struct sigaction crashAction = {};
+    crashAction.sa_sigaction = &CrashStackHandler;
+    crashAction.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &crashAction, nullptr);
+    sigaction(SIGBUS, &crashAction, nullptr);
+    sigaction(SIGILL, &crashAction, nullptr);
 #endif
 
     Trinity::VerifyOsVersion();

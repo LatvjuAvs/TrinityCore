@@ -6914,8 +6914,13 @@ Result API::use_game_object(ObjectGuid go_guid)
                 p_->ModifyMoney(loot->gold);
                 loot->gold = 0;
             }
-            p_->SendLootRelease(go_guid);
         }
+        // Close the window as a player does. SendLootRelease alone only tells the client, so an emptied vein stayed open and
+        // empty until this bot came back, and that second use crashed the server (2026-11-02). May free loot.
+        if (WorldSession* sess = p_->GetSession())
+            sess->DoLootRelease(loot);
+        else
+            p_->SendLootRelease(go_guid);
     }
     return Result::Ok;
 }

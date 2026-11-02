@@ -64,7 +64,8 @@ bool TravelToRegistrar(BotSnapshotView const& s, BotAI& ai, BotIntentEmitter& em
         { true, 1, 10076.0f, 2200.0f, 1347.0f }, // Lysheana, Darnassus
         { false, 1, 1576.0f, -4293.0f, 26.0f },  // Urtrun Clanbringer, Orgrimmar
         { false, 0, 1591.0f, 204.0f, -55.0f },   // Christopher Drakul, Undercity
-        // Not Krumn in Thunder Bluff: the mmaps do not join Mulgore to the lifts' bases, so a founder from Mulgore walks to Orgrimmar.
+        // Not Krumn in Thunder Bluff: the mmaps do not join Mulgore to the lifts' bases, so a founder from Mulgore goes to Orgrimmar.
+        // Its plan still prefers the lift and a flight when it knows the flight point, and stalls below the lift.
     };
     bool const alliance = f == ::Playerbot::V2::BotGuildMgr::FACTION_ALLIANCE;
     float bx, by, bz; s.position(bx, by, bz);

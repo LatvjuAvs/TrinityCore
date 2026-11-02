@@ -2825,6 +2825,11 @@ void GameObject::Use(Unit* user, bool ignoreCastInProgress /*= false*/)
             if (getLootState() != GO_ACTIVATED)
                 SetLootState(GO_ACTIVATED, player);
 
+            // SendLoot releases what the player has open, and releasing an emptied vein frees its loot (TryReopenChest).
+            // Release first, so the pointer below cannot be the one that gets freed.
+            if (!player->GetLootGUID().IsEmpty())
+                player->GetSession()->DoLootReleaseAll();
+
             // Send loot
             if (Loot* loot = GetLootForPlayer(player))
                 player->SendLoot(*loot);
