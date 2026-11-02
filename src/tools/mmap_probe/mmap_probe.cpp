@@ -311,8 +311,11 @@ int RunQuery(dtNavMesh* navMesh, dtNavMeshQuery* query,
     static constexpr int MAX_PATH_LENGTH = 20000; // local: long enough for a whole walk (PathGenerator stops at 74)
     static dtPolyRef pathPolys[MAX_PATH_LENGTH];
     int polyCount = 0;
+    // MMAP_PROBE_MAX_POLYS=74 answers what a bot's own PathGenerator can do in one move
+    char const* const maxPolysEnv = std::getenv("MMAP_PROBE_MAX_POLYS");
+    int const maxPolys = maxPolysEnv ? std::min(std::atoi(maxPolysEnv), MAX_PATH_LENGTH) : MAX_PATH_LENGTH;
     s = query->findPath(startRef, endRef, startClosest, endClosest, &filter,
-        pathPolys, &polyCount, MAX_PATH_LENGTH);
+        pathPolys, &polyCount, maxPolys);
 
     bool partial = (s & DT_PARTIAL_RESULT) != 0;
     bool failed = dtStatusFailed(s);

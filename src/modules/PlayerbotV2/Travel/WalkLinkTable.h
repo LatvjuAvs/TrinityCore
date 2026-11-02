@@ -71,10 +71,6 @@ inline constexpr WalkLink kWalkLinks[] =
     { 0, 2270.7f, 280.0f, 36.7f, 2326.6f, 1351.7f, 33.5f, 1080.0f },
     { 0, 931.3f, -1430.1f, 64.7f, -33.4f, -927.9f, 54.5f, 1176.0f },
     { 0, 1767.3f, 418.4f, -57.1f, 2326.6f, 1351.7f, 33.5f, 1958.0f },
-    // Local (M7), tools/walk_link_check.py, 2026-11-01: Orgrimmar to Razor Hill, Camp Taurajo to Bloodhoof, Bloodhoof to Camp Narache.
-    { 1, 1451.6f, -4209.4f, 43.6f, 275.3f, -4704.0f, 11.7f, 1932.2f },
-    { 1, -2380.7f, -1882.7f, 95.8f, -2299.0f, -437.7f, -5.4f, 1470.1f },
-    { 1, -2299.0f, -437.7f, -5.4f, -2893.2f, -239.6f, 53.6f, 1513.7f },
     { 1, -441.8f, -2596.1f, 96.1f, -474.9f, -2607.7f, 127.9f, 104.0f },
     { 1, -1197.2f, 29.7f, 176.9f, -1246.5f, 74.3f, 128.4f, 149.0f },
     { 1, -6811.4f, 836.7f, 49.8f, -6761.8f, 772.0f, 88.9f, 132.0f },
@@ -121,6 +117,56 @@ inline constexpr WalkLink kWalkLinks[] =
     { 2991, 2262.7f, 917.6f, 675.3f, 1993.6f, 545.6f, 658.7f, 485.0f },
     { 2991, 2037.1f, 1529.9f, 648.5f, 2262.7f, 917.6f, 675.3f, 687.0f },
     { 2991, 2037.1f, 1529.9f, 648.5f, 1993.6f, 545.6f, 658.7f, 1094.0f },
+};
+
+// Roads: links that bend. A bot walks a leg over 250 y as a straight line at its end (kFullWaypointDist in State_Idle), so it stops at
+// the first ridge on a link like these, and a new plan from there walks back to the nearest graph node. Each road is a chain of graph
+// nodes that a bot paths hop by hop; a bot on the road also attaches to the road, not to its far ends. Consecutive rows with the same
+// road number are joined, the first and last name existing nodes. Rows come from tools/walk_link_check.py --road, every hop checked at
+// PathGenerator's own limit of 74 polygons.
+struct WalkRoadPoint
+{
+    std::uint32_t map;
+    std::uint32_t road;
+    float x, y, z;
+};
+
+inline constexpr WalkRoadPoint kWalkRoadPoints[] =
+{
+    // Local (M7), 2026-11-02: Orgrimmar to Razor Hill, Camp Taurajo to Bloodhoof, Bloodhoof to Camp Narache.
+    { 1, 0, 1451.6f, -4209.4f, 43.6f },
+    { 1, 0, 1622.4f, -4253.9f, 49.3f },
+    { 1, 0, 1694.9f, -4275.5f, 33.6f },
+    { 1, 0, 1533.1f, -4345.2f, 18.0f },
+    { 1, 0, 1370.7f, -4378.7f, 26.3f },
+    { 1, 0, 1203.8f, -4403.8f, 23.5f },
+    { 1, 0, 1041.8f, -4433.8f, 13.9f },
+    { 1, 0, 887.1f, -4494.0f, 7.5f },
+    { 1, 0, 751.5f, -4608.9f, -2.3f },
+    { 1, 0, 618.7f, -4714.7f, -9.6f },
+    { 1, 0, 456.0f, -4736.0f, 6.7f },
+    { 1, 0, 278.1f, -4709.6f, 11.8f },
+    { 1, 0, 275.3f, -4704.0f, 11.7f },
+    { 1, 1, -2380.7f, -1882.7f, 95.8f },
+    { 1, 1, -2373.6f, -1713.9f, 89.8f },
+    { 1, 1, -2368.0f, -1537.5f, 60.0f },
+    { 1, 1, -2365.4f, -1361.8f, 9.4f },
+    { 1, 1, -2362.9f, -1186.2f, -4.3f },
+    { 1, 1, -2360.4f, -1010.5f, -8.7f },
+    { 1, 1, -2357.3f, -835.5f, -8.6f },
+    { 1, 1, -2349.9f, -665.5f, -8.0f },
+    { 1, 1, -2325.3f, -490.7f, -8.5f },
+    { 1, 1, -2299.0f, -437.7f, -5.4f },
+    { 1, 2, -2299.0f, -437.7f, -5.4f },
+    { 1, 2, -2461.3f, -400.0f, -3.5f },
+    { 1, 2, -2618.7f, -330.7f, -8.4f },
+    { 1, 2, -2733.3f, -194.7f, 12.7f },
+    { 1, 2, -2805.3f, -32.0f, 12.6f },
+    { 1, 2, -2889.9f, 93.8f, 95.3f },
+    { 1, 2, -3063.2f, 48.3f, 85.6f },
+    { 1, 2, -3031.7f, -116.5f, 65.6f },
+    { 1, 2, -2902.9f, -227.0f, 54.0f },
+    { 1, 2, -2893.2f, -239.6f, 53.6f },
 };
 
 // A link end is a graph node's own position, written with one decimal; the node it names is the nearest within this many yards.

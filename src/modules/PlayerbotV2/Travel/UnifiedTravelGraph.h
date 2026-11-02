@@ -53,6 +53,7 @@ enum class NodeKind : uint8
     Hearth         = 8,   // Virtual node anchored on bot's homebind; per-bot
     ElevatorStop   = 9,   // One per ElevatorIndex::ElevatorStop; same-map pairs joined by Elevator edges
     AreaTriggerTel = 10,  // areatrigger_teleport endpoint (source volume or landing point); same-map island bridges
+    Road           = 11,  // Waypoint of a checked road (WalkLinkTable.h); walk edges only to its neighbours on the road
 };
 
 enum class EdgeKind : uint8
@@ -278,6 +279,7 @@ private:
     void BuildPortalEdges();    // Portal/Dock edges: cross-map, and same-map transport rides (dock -> dock)
     void MarkConnectorMaps();   // maps exempt from the transit penalty (same-map ride, nothing else there)
     void AddCheckedWalkLinks(); // the fixed, offline-checked links of WalkLinkTable.h
+    void AddWalkRoads();        // the checked roads of WalkLinkTable.h, as chains of nodes
     void LogForeverMaps() const;  // [forever_maps] hubs and docks on the Classic 1.60 maps
     void LogWalkGaps() const;   // [walk_gaps] diagnostic after BuildWalkEdges
     void BuildWalkEdges();      // Same-map intra-cluster walk edges (bounded)

@@ -986,6 +986,7 @@ void UnifiedTravelGraph::BuildWalkEdges()
     TC_LOG_INFO("playerbot.v2", "[UnifiedTravelGraph] BuildWalkEdges: {} edges (cap={}y)",
                 added, uint32(kMaxWalkEdgeYds));
     AddCheckedWalkLinks();
+    AddWalkRoads();
     LogWalkGaps();
 }
 
@@ -1031,6 +1032,63 @@ void UnifiedTravelGraph::AddCheckedWalkLinks()
     }
     TC_LOG_INFO("playerbot.v2", "[UnifiedTravelGraph] WalkLinks: {} edges from {} checked links, {} with an end that names no node",
                 added, uint32(std::size(kWalkLinks)), unmatched);
+}
+
+// The roads of Travel/WalkLinkTable.h. Added after the walk edges on purpose: a road node joins only its neighbours on the road, since the
+// 600 y rule would also tie it to nodes across the ridge the road goes around.
+void UnifiedTravelGraph::AddWalkRoads()
+{
+    struct P { float x, y, z; };
+    uint32 roads = 0, nodes = 0, unmatched = 0;
+    size_t const count = std::size(kWalkRoadPoints);
+    for (size_t first = 0, last; first < count; first = last + 1)
+    {
+        WalkRoadPoint const& f = kWalkRoadPoints[first];
+        last = first;
+        while (last + 1 < count && kWalkRoadPoints[last + 1].road == f.road)
+            ++last;
+        WalkRoadPoint const& l = kWalkRoadPoints[last];
+        auto const map_it = _nodes_by_map.find(f.map);
+        if (map_it == _nodes_by_map.end())
+        {
+            ++unmatched;
+            continue;
+        }
+        std::vector<P> pts;
+        pts.reserve(map_it->second.size());
+        for (NodeId id : map_it->second)
+            pts.push_back(P{ _nodes[id].x, _nodes[id].y, _nodes[id].z });
+        long const ia = MatchWalkLinkEnd(pts, f.x, f.y, f.z);
+        long const ib = MatchWalkLinkEnd(pts, l.x, l.y, l.z);
+        if (ia < 0 || ib < 0 || ia == ib)
+        {
+            ++unmatched;
+            continue;
+        }
+        NodeId const end = map_it->second[size_t(ib)];
+        NodeId prev = map_it->second[size_t(ia)];
+        for (size_t i = first + 1; i <= last; ++i)
+        {
+            WalkRoadPoint const& w = kWalkRoadPoints[i];
+            NodeId next = end;
+            if (i != last)
+            {
+                GraphNode n;
+                n.kind   = NodeKind::Road;
+                n.map_id = w.map;
+                n.x = w.x; n.y = w.y; n.z = w.z;
+                n.name   = "Road";
+                next = AppendNode(std::move(n));
+                ++nodes;
+            }
+            float const cost = Dist2D(_nodes[prev].x, _nodes[prev].y, _nodes[next].x, _nodes[next].y) / kWalkSpeedYds;
+            AddEdge(prev, GraphEdge{next, EdgeKind::Walk, cost, 0, 0});
+            AddEdge(next, GraphEdge{prev, EdgeKind::Walk, cost, 0, 0});
+            prev = next;
+        }
+        ++roads;
+    }
+    TC_LOG_INFO("playerbot.v2", "[UnifiedTravelGraph] WalkRoads: {} roads with {} new nodes, {} with an end that names no node", roads, nodes, unmatched);
 }
 
 // Names the places where the walk edges of one landmass break into separate pieces, so a "no route" between two hubs on the same map can
