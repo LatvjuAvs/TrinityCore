@@ -115,6 +115,7 @@
 #include "MovementPackets.h"
 #include "Opcodes.h"
 #include "MotionMaster.h"
+#include "MoveSpline.h"
 #include "PlayerbotMovement.h"  // BotMovement::SafeTeleport for rescue paths
 #include "ObjectMgr.h"
 #include <shared_mutex>
@@ -383,6 +384,37 @@ void SnapToGroundIfDrifted(Player* p)
             p->GetName(), curZ, groundZ);
         p->NearTeleportTo(p->GetPositionX(), p->GetPositionY(), groundZ, p->GetOrientation());
     }
+}
+
+// Local (M7): a log of a bot whose z falls 6 y or more between two snapshots while it moved 25 y or less. Live 2026-11-03: bots
+// in Orgrimmar ended up on a navmesh layer under the Valley of Strength at z -2.8 that no path leaves, and no logged move
+// explains how (kb/reports/2026-11-03-under-orgrimmar.md). Logging only.
+struct ZWatch { uint32 map = 0; float x = 0.f, y = 0.f, z = 0.f; uint32 ms = 0, logged_ms = 0; uint8 gen = 0; std::string rule; };
+std::unordered_map<uint64, ZWatch> g_zwatch;
+
+void WatchZDrop(Player* p, BotAI const* ai)
+{
+    if (!p || !p->IsAlive() || p->IsBeingTeleported() || p->GetTransport() || p->IsFlying())
+        return;
+    ZWatch& w = g_zwatch[p->GetGUID().GetCounter()];
+    uint32 const now = getMSTime();
+    float const x = p->GetPositionX(), y = p->GetPositionY(), z = p->GetPositionZ();
+    uint8 const gen = uint8(p->GetMotionMaster()->GetCurrentMovementGeneratorType());
+    char const* rule = ai && ai->last_rule_fired() ? ai->last_rule_fired() : "";
+    if (w.ms != 0 && w.map == p->GetMapId() && getMSTimeDiff(w.ms, now) <= 10000 && w.z - z >= 6.0f
+        && std::hypot(x - w.x, y - w.y) <= 25.0f && (w.logged_ms == 0 || getMSTimeDiff(w.logged_ms, now) >= 30000))
+    {
+        w.logged_ms = now;
+        G3D::Vector3 dest(0.f, 0.f, 0.f);
+        if (!p->movespline->Finalized())
+            dest = p->movespline->FinalDestination();
+        TC_LOG_INFO("playerbot.v2",
+            "[z_drop] {} map={} zone={} from=({:.1f},{:.1f},{:.1f}) to=({:.1f},{:.1f},{:.1f}) in {} ms falling={} gen {}->{} "
+            "rule {} -> {} spline_dest=({:.1f},{:.1f},{:.1f})",
+            p->GetName(), p->GetMapId(), p->GetZoneId(), w.x, w.y, w.z, x, y, z, getMSTimeDiff(w.ms, now), p->IsFalling() ? 1 : 0,
+            uint32(w.gen), uint32(gen), w.rule.empty() ? "-" : w.rule, *rule ? rule : "-", dest.x, dest.y, dest.z);
+    }
+    w.map = p->GetMapId(); w.x = x; w.y = y; w.z = z; w.ms = now; w.gen = gen; w.rule = rule;
 }
 
 // Global off-mesh stuck rescue. Per-rule wedge guards (Pass 14 on
@@ -1653,6 +1685,7 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
                 // a no-op for bots not in an orphaned BG map.
                 RescueOrphanedBgBot(p);
                 SnapToGroundIfDrifted(p);
+                WatchZDrop(p, e.ai.get());   // local (M7)
                 // Resolve the bot's bot logic ONCE here on the world thread (registry
                 // quiescent under for_each's shared_lock) and thread it through
                 // the BuiltSlot. Build workers MUST NOT call Registry().ai()
@@ -2892,6 +2925,7 @@ void Module::OnPlayerLogout(Player* p)
     // the leak is slow but real for long-running servers — and the
     // entries are dead data (guid_low is unique per character).
     g_last_snap_z_ms.erase(id);
+    g_zwatch.erase(id);   // local (M7)
     g_global_stuck.erase(id);
     TC_LOG_INFO("playerbot.v2", "[PlayerbotV2] Bot logic detached: {} (id {})", p->GetName(), id);
 }
