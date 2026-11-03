@@ -15794,7 +15794,12 @@ bool DriveTravelPlanTo(BotSnapshotView const& s, BotAI& ai, BotIntentEmitter& em
                 // staying under the ~292y FindSmoothPath length where a single
                 // move_to path starts getting budget-truncated.
                 constexpr float kFullWaypointDist = 250.0f;
-                if (dist <= kFullWaypointDist)
+                // Local (M7): Playerbot.World.WalkLegsByPath (default off, as upstream). On, a far leg also goes to move_to whole,
+                // which walks PathGenerator's partial path of 74 polygons and paths again from its end, so the bot follows the mesh
+                // round a ridge instead of stepping straight at the leg's end. tools/walk_link_check.py --follow-mesh, 2026-11-03:
+                // 70 of 93 walk links finish both ways, against 26 for the straight steps.
+                static bool const walk_by_path = sConfigMgr->GetBoolDefault("Playerbot.World.WalkLegsByPath", false, true);
+                if (dist <= kFullWaypointDist || walk_by_path)
                 {
                     emit.move_to(wx, wy, wz, /*run*/ true);
                 }
