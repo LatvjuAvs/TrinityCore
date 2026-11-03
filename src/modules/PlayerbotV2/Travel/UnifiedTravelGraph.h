@@ -41,6 +41,8 @@ class Player;
 
 namespace Playerbot::V2::Travel {
 
+struct WalkLink;   // Travel/WalkLinkTable.h
+
 enum class NodeKind : uint8
 {
     FlightMaster   = 1,   // sTaxiNodesStore entry (per-faction reachable)
@@ -278,7 +280,8 @@ private:
     void BuildTaxiEdges();      // sTaxiPathStore → directed Taxi edges
     void BuildPortalEdges();    // Portal/Dock edges: cross-map, and same-map transport rides (dock -> dock)
     void MarkConnectorMaps();   // maps exempt from the transit penalty (same-map ride, nothing else there)
-    void AddCheckedWalkLinks(); // the fixed, offline-checked links of WalkLinkTable.h
+    // the fixed, offline-checked links or junctions of WalkLinkTable.h; `what` names them in the log
+    void AddCheckedWalkLinks(WalkLink const* links, size_t count, char const* what);
     void AddWalkRoads();        // the checked roads of WalkLinkTable.h, as chains of nodes
     void LogForeverMaps() const;  // [forever_maps] hubs and docks on the Classic 1.60 maps
     void LogWalkGaps() const;   // [walk_gaps] diagnostic after BuildWalkEdges

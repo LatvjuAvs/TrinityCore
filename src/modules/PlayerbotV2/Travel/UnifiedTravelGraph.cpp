@@ -985,19 +985,21 @@ void UnifiedTravelGraph::BuildWalkEdges()
     }
     TC_LOG_INFO("playerbot.v2", "[UnifiedTravelGraph] BuildWalkEdges: {} edges (cap={}y)",
                 added, uint32(kMaxWalkEdgeYds));
-    AddCheckedWalkLinks();
+    AddCheckedWalkLinks(kWalkLinks, std::size(kWalkLinks), "WalkLinks");
     AddWalkRoads();
+    AddCheckedWalkLinks(kWalkJunctions, std::size(kWalkJunctions), "WalkJunctions");   // after the roads: they join road nodes
     LogWalkGaps();
 }
 
 // The fixed links of Travel/WalkLinkTable.h: walk edges between pieces that the 600 y / 18 y rule leaves apart, each one checked offline
 // against the real mmaps. An end that names no node (the node data changed since the check) is skipped and counted.
-void UnifiedTravelGraph::AddCheckedWalkLinks()
+void UnifiedTravelGraph::AddCheckedWalkLinks(WalkLink const* links, size_t count, char const* what)
 {
     struct P { float x, y, z; };
     uint32 added = 0, unmatched = 0;
-    for (WalkLink const& l : kWalkLinks)
+    for (size_t li = 0; li < count; ++li)
     {
+        WalkLink const& l = links[li];
         auto const map_it = _nodes_by_map.find(l.map);
         if (map_it == _nodes_by_map.end())
         {
@@ -1030,8 +1032,8 @@ void UnifiedTravelGraph::AddCheckedWalkLinks()
         AddEdge(b, eba);
         added += 2;
     }
-    TC_LOG_INFO("playerbot.v2", "[UnifiedTravelGraph] WalkLinks: {} edges from {} checked links, {} with an end that names no node",
-                added, uint32(std::size(kWalkLinks)), unmatched);
+    TC_LOG_INFO("playerbot.v2", "[UnifiedTravelGraph] {}: {} edges from {} checked links, {} with an end that names no node",
+                what, added, uint32(count), unmatched);
 }
 
 // The roads of Travel/WalkLinkTable.h. Added after the walk edges on purpose: a road node joins only its neighbours on the road, since the
