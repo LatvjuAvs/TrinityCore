@@ -4611,7 +4611,27 @@ public:
     bool   reloc_bridge_has()      const { return reloc_bridge_has_; }
     uint32 reloc_bridge_at_ms()    const { return reloc_bridge_at_ms_; }
     void   set_reloc_bridge_decision(uint64 goal_key, bool has, uint32 now_ms)
-    { reloc_bridge_goal_ = goal_key; reloc_bridge_has_ = has; reloc_bridge_at_ms_ = now_ms; reloc_bridge_legs_.clear(); }
+    {
+        if (goal_key != reloc_bridge_goal_)   // local (M7): the decision it replaces stays in the second slot
+        {
+            reloc_bridge_prev_goal_ = reloc_bridge_goal_; reloc_bridge_prev_has_ = reloc_bridge_has_;
+            reloc_bridge_prev_at_ms_ = reloc_bridge_at_ms_; reloc_bridge_prev_legs_ = std::move(reloc_bridge_legs_);
+        }
+        reloc_bridge_goal_ = goal_key; reloc_bridge_has_ = has; reloc_bridge_at_ms_ = now_ms; reloc_bridge_legs_.clear();
+    }
+    // Local (M7): the hub relocation and the stuck objective both probe through this cache, and a bot whose hub and objective
+    // differ overwrote one with the other at every snapshot: 99% of the 240,000 [bridge_probe] route searches in 2 hours on
+    // 2026-11-03 were such flips, from 30 bots. A goal found in the second slot is swapped back in instead of searched again.
+    bool   swap_in_reloc_bridge(uint64 goal_key)
+    {
+        if (goal_key == reloc_bridge_goal_ || goal_key != reloc_bridge_prev_goal_ || goal_key == 0)
+            return false;
+        std::swap(reloc_bridge_goal_, reloc_bridge_prev_goal_);
+        std::swap(reloc_bridge_has_, reloc_bridge_prev_has_);
+        std::swap(reloc_bridge_at_ms_, reloc_bridge_prev_at_ms_);
+        std::swap(reloc_bridge_legs_, reloc_bridge_prev_legs_);
+        return true;
+    }
 
     // ---- CombatLoop FIX C: sticky scan-MISS POI-fallback spawn ----
     // When the builder resolves a quest-target spawn as the objective POI
@@ -5182,6 +5202,10 @@ private:
     bool               reloc_bridge_has_  = false;
     uint32             reloc_bridge_at_ms_ = 0;   // probe time, for negative-verdict expiry
     std::vector<PlanLeg> reloc_bridge_legs_{};   // world-thread only (see accessor)
+    uint64             reloc_bridge_prev_goal_ = 0;   // local (M7): second slot, see swap_in_reloc_bridge
+    bool               reloc_bridge_prev_has_  = false;
+    uint32             reloc_bridge_prev_at_ms_ = 0;
+    std::vector<PlanLeg> reloc_bridge_prev_legs_{};
     // CombatLoop FIX C scan-MISS POI-fallback hysteresis (world-thread only).
     PoiSpawnSticky     poi_spawn_sticky_{};
     // Zero-yield combat watchdog (combat:disengage_no_progress): tracks the

@@ -15771,10 +15771,14 @@ bool DriveTravelPlanTo(BotSnapshotView const& s, BotAI& ai, BotIntentEmitter& em
                     // No skippable leg (non-walk, or last leg): discard the plan
                     // and force the next plant through graph A* so the
                     // elevator/teleport route composes (trivial-branch trap).
-                    if (ai.current_travel_leg() && !ai.travel_force_graph())
+                    // Local (M7): under the same 6 s gate as the skip. The plan planted next resets the force flag, and the wedge
+                    // answers "wedged" at every tick of its 30 s cooldown, so the plan was dropped and planted again at every tick:
+                    // 28,322 of 70,917 plans in 2 hours on 2026-11-03 repeated the bot's last goal within 5 s.
+                    if (ai.current_travel_leg() && !ai.travel_force_graph() && (sk_now - ai.last_leg_skip_ms()) > 6000)
                     {
                         ai.set_travel_force_graph(true);
                         ai.clear_travel_plan();
+                        ai.set_last_leg_skip_ms(sk_now);
                     }
                     return false;
                 }

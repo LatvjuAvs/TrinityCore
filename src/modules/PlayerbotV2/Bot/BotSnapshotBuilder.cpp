@@ -1373,6 +1373,7 @@ bool GraphHasBridgeRoute(Player* p, BotAI* ai, uint32 toMap,
 {
     using namespace ::Playerbot::V2::Travel;
     const uint64 goalKey = BridgeGoalKey(toMap, tx, ty);
+    ai->swap_in_reloc_bridge(goalKey);   // local (M7): the other consumer's goal, decided before
 
     // Negative-verdict expiry: a "no route" probe result can be a FALSE
     // negative — right after login/teleport the map tiles are still
