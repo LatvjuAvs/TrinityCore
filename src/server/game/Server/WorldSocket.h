@@ -173,9 +173,6 @@ private:
     std::unique_ptr<Trinity::Net::IpConnectionLimit::Slot> _ipConnectionSlot;
     TimePoint _authDeadline;        // closed if not logged in by then (Network.AuthTimeout); TimePoint::max() = no limit
 
-    std::unique_ptr<Trinity::Net::IpConnectionLimit::Slot> _ipConnectionSlot;
-    TimePoint _authDeadline;        // closed if not logged in by then (Network.AuthTimeout); TimePoint::max() = no limit
-
     MessageBuffer _headerBuffer;
     MessageBuffer _packetBuffer;
     MPSCQueue<EncryptablePacket, &EncryptablePacket::SocketQueueLink> _bufferQueue;
