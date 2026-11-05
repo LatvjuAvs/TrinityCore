@@ -100,7 +100,6 @@ namespace Battlenet
         // one login (auth token check against the login database) at a time per connection; false: one is already running or done
         bool TryBeginLogin();
         void EndLogin() { _loginInFlight = false; }
-        void SetHandshakeDone() { _handshakeDone = true; }
 
         uint32 GetSessionId() const { return _sessionId; }
         SystemTimePoint GetCreationTime() const { return _creationTime; }
