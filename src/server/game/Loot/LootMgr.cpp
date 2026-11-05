@@ -1172,6 +1172,11 @@ void LoadLootTemplates_Disenchant()
             lootIdSetUsed.insert(lootid);
     }
 
+    // Classic 1.60: an ITEM_FLAG2_DISENCHANT_TO_LOOT_TABLE item may have an entry of its own, keyed by its item id (Item::GetDisenchantLootId)
+    for (auto const& [itemId, itemTemplate] : sObjectMgr->GetItemTemplateStore())
+        if (itemTemplate.HasFlag(ITEM_FLAG2_DISENCHANT_TO_LOOT_TABLE) && lootIdSet.contains(itemId))
+            lootIdSetUsed.insert(itemId);
+
     for (uint32 lootId : lootIdSetUsed)
         lootIdSet.erase(lootId);
 

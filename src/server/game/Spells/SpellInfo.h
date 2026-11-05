@@ -47,7 +47,7 @@ enum SpellTargetSelectionCategories
     TARGET_SELECT_CATEGORY_CONE,
     TARGET_SELECT_CATEGORY_AREA,
     TARGET_SELECT_CATEGORY_TRAJ,
-    TARGET_SELECT_CATEGORY_LINE
+    TARGET_SELECT_CATEGORY_RECT
 };
 
 enum SpellTargetReferenceTypes
@@ -136,7 +136,9 @@ enum SpellSpecificType
     SPELL_SPECIFIC_PRIEST_DIVINE_SPIRIT          = 27,
     SPELL_SPECIFIC_HAND                          = 28,
     SPELL_SPECIFIC_PHASE                         = 29,
-    SPELL_SPECIFIC_BANE                          = 30
+    SPELL_SPECIFIC_BANE                          = 30,
+    SPELL_SPECIFIC_BLESSING                      = 31, // Classic: one blessing per paladin on a target
+    SPELL_SPECIFIC_JUDGEMENT                     = 32  // Classic: one judgement per paladin on a target
 };
 
 enum SpellCustomAttributes
@@ -270,6 +272,7 @@ public:
     SpellEffectValue CalcValue(WorldObject const* caster = nullptr, SpellEffectValue const* basePoints = nullptr, Unit const* target = nullptr, float* variance = nullptr, uint32 castItemId = 0, int32 itemLevel = -1) const;
     SpellEffectValue CalcBaseValue(WorldObject const* caster, Unit const* target, uint32 itemId, int32 itemLevel) const;
     bool UsesClassicFlatBasePoints(WorldObject const* caster) const;
+    float ClassicCreatureLevelSpellScale(uint8 casterLevel) const;
     float CalcValueMultiplier(WorldObject* caster, Spell* spell = nullptr) const;
     float CalcDamageMultiplier(WorldObject* caster, Spell* spell = nullptr) const;
 

@@ -118,6 +118,14 @@ class TC_GAME_API Pet final : public Guardian
         uint32 GetTrainingPointsUsed() const;
         void UpdateTrainingPoints();
 
+        // Classic 1.60 pet trainers: a trainer spell whose Learn Spell effect targets the pet teaches the hunter's pet, not the hunter
+        // (4195 Great Stamina teaches the pet 4187). The pet trainer's "I wish to untrain my pet." removes every spell taught that way.
+        static uint32 GetTrainerTaughtPetSpell(uint32 trainerSpellId);   // 0 = the trainer spell does not teach the pet
+        static bool IsTrainerTaughtPetSpell(uint32 petSpellId);
+        static bool IsPetUntrainGossipOption(int32 gossipOptionId);
+        bool KnowsSpellOrHigherRank(uint32 spellId) const;
+        uint32 UntrainTrainerSpells();                                   // spells removed
+
         void SetDuration(int32 dur) { m_duration = dur; }
         int32 GetDuration() const { return m_duration; }
 

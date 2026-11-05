@@ -1479,6 +1479,9 @@ class TC_GAME_API Unit : public WorldObject
         void FinishSpell(CurrentSpellTypes spellType, SpellCastResult result = SPELL_CAST_OK);
 
         void CancelAutoRepeatSpell();
+        // Classic 1.60: whether Auto Shot (75) may take a shot now as far as the wind-up goes: it is already on and the unit has stood
+        // still for half a second (players only; ClassicAutoShot.h)
+        bool IsClassicAutoShotWindupDone() const;
 
         // set withDelayed to true to account delayed spells as cast
         // delayed+channeled spells are always accounted as cast
@@ -1832,7 +1835,7 @@ class TC_GAME_API Unit : public WorldObject
 
         int32 RewardRage(uint32 baseRage);
         // Classic 1.60 (vanilla) combat: rage from damage, weapon / defense skill of the attack table, blocked amount
-        int32 RewardClassicRage(uint32 damage, bool attacker);
+        int32 RewardClassicRage(float damage, bool attacker);   // damage stays fractional (Dual Wield Specialization bonus on small hits)
         int32 GetClassicWeaponSkill(WeaponAttackType attType, Unit const* victim) const;
         int32 GetClassicDefenseSkill(Unit const* attacker) const;
         virtual uint32 GetClassicShieldBlockValue() const { return GetLevel() / 2 + uint32(std::max(0.0f, GetStat(STAT_STRENGTH)) / 20.0f); }
@@ -1916,6 +1919,11 @@ class TC_GAME_API Unit : public WorldObject
         void _DeleteRemovedAuras();
 
         void _UpdateAutoRepeatSpell();
+
+        // Classic 1.60 Auto Shot (ClassicAutoShot.h): game time the hunter last moved or turned Auto Shot on (the half-second wind-up
+        // counts from here), and the last failure reason told to the client (told once, not every update)
+        uint32 m_classicAutoShotStillSince = 0;
+        SpellCastResult m_classicAutoShotLastReported = SPELL_CAST_OK;
 
         bool m_ControlledByPlayer;
 

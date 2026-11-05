@@ -1214,6 +1214,7 @@ private:
 
 uint32 constexpr PLAYER_MAX_HONOR_LEVEL = 500;
 uint8 constexpr PLAYER_LEVEL_MIN_HONOR = 10;
+uint32 constexpr CURRENCY_HONOR_CLASSIC = 1792; // Classic 1.60: Honor currency spent at the PvP quartermasters
 uint32 constexpr SPELL_PVP_RULES_ENABLED = 134735;
 float constexpr MAX_AREA_SPIRIT_HEALER_RANGE = 20.0f;
 
@@ -1670,7 +1671,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         Item* GetItemFromBuyBackSlot(uint32 slot);
         void RemoveItemFromBuyBackSlot(uint32 slot, bool del);
         void SendEquipError(InventoryResult msg, Item const* item1 = nullptr, Item const* item2 = nullptr, uint32 itemId = 0) const;
-        void SendBuyError(BuyResult msg, Creature* creature, uint32 item, uint32 param) const;
+        void SendBuyError(BuyResult msg, Creature const* creature, uint32 vendorslot) const;
         void SendSellError(SellResult msg, Creature* creature, ObjectGuid guid) const;
         void AddWeaponProficiency(uint32 newflag) { m_WeaponProficiency |= newflag; }
         void AddArmorProficiency(uint32 newflag) { m_ArmorProficiency |= newflag; }
@@ -2064,6 +2065,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         UF::TraitConfig const* GetClassicSpecGroupConfig(bool secondary) const;   // Classic 1.60 dual spec
         bool ActivateClassicSpecGroup(bool secondary);
         bool PurchaseClassicDualSpec();
+        bool UntrainClassicPet(int64 cost);
         static bool IsClassicDualSpecGossipOption(int32 gossipOptionId);
         TalentLearnResult LearnTalent(uint32 talentId, int32* spellOnCooldown);
         bool AddTalent(TalentEntry const* talent, uint8 spec, bool learning);

@@ -32,6 +32,8 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include "UpdateFields.h"
+#include <array>
+#include <list>
 #include <set>
 
 /*######
@@ -63,7 +65,7 @@ struct classic_go_field_repair_bot_74A : public GameObjectAI
 ######*/
 
 // Classic 1.60 (WoW Forever) camping: sitting near a campfire starts this 60 s rest (WorldSession::HandleStandStateChangeOpcode);
-// when it runs out the player gets the "Boosted ..." buff of every camp feature placed near the fire (client spell texts: "Players
+// when it runs out the player gets the "Boosted ..." buff of every camp feature near where they sit (client spell texts: "Players
 // sitting or crafting nearby for 1 min will gain benefits from other camp features") and, still sitting by the fire, the next rest
 // starts (ymir sniff of the official beta). Standing up removes it early, so the minute has to be sat out in one go.
 enum CampfireRest
@@ -84,7 +86,9 @@ enum CampfireRest
 };
 
 static constexpr float CAMPFIRE_RANGE = 15.0f;      // sitting this close to the fire (same as HandleStandStateChangeOpcode)
-static constexpr float CAMP_FEATURE_RANGE = 20.0f;  // features this close to the fire count ("Camp Benefits" 1229741, radius 9)
+// features this close to the resting player count: Camp Benefits 1229741 finds them with its area effects 1 and 2 (creatures and
+// gameobjects round the caster's spot, radius index 9 = 20 yards), not round the fire
+static constexpr float CAMP_FEATURE_RANGE = 20.0f;
 
 // Camp features -> their "Boosted ..." buff. The features are the gameobjects summoned by the placement spells (1307229 Camp Chair,
 // 1307254 Lodestone, ... effect 50); only Chair, Lodestone and Mana Well have templates so far (sniffed next to the camping
@@ -196,9 +200,9 @@ class classic_spell_campfire_rest : public AuraScript
         std::set<uint32> buffs;
         for (CampFeature const& feature : CampFeatures)
         {
-            bool nearFire = feature.IsCreature ? fire->FindNearestCreature(feature.Entry, CAMP_FEATURE_RANGE) != nullptr
-                : fire->FindNearestGameObject(feature.Entry, CAMP_FEATURE_RANGE) != nullptr;
-            if (nearFire && sSpellMgr->GetSpellInfo(feature.Buff, DIFFICULTY_NONE))
+            bool nearby = feature.IsCreature ? target->FindNearestCreature(feature.Entry, CAMP_FEATURE_RANGE) != nullptr
+                : target->FindNearestGameObject(feature.Entry, CAMP_FEATURE_RANGE) != nullptr;
+            if (nearby && sSpellMgr->GetSpellInfo(feature.Buff, DIFFICULTY_NONE))
                 buffs.insert(feature.Buff);
         }
         for (uint32 buff : buffs)
@@ -215,6 +219,108 @@ class classic_spell_campfire_rest : public AuraScript
     void Register() override
     {
         AfterEffectRemove += AuraEffectRemoveFn(classic_spell_campfire_rest::AfterRemove, EFFECT_0, SPELL_AURA_ANY, AURA_EFFECT_HANDLE_REAL);
+    }
+};
+
+/*######
+## classic_spell_camp_feature_placement (the camp feature spells, "Requires a Campfire nearby")
+######*/
+
+// A player's campfire "allows ... the placement of up to $s1 additional camp features" (70707 client texts: Basic Campfire 1307227
+// effect 0 = 3, Journeyman 1307252 = 5, Expert 1307237 = 10). Nothing counted them, so any number could be placed (Azeldof,
+// 2026-11-02). A feature counts for the fire it stands near. The higher tier features "may be placed over" a lower one "to replace
+// it": that one is removed and the count stays the same. A campfire that is part of the world (no spell made it) has no limit.
+struct CampPlacement
+{
+    uint32 SpellId;
+    std::array<uint32, 2> Replaces;     // camp feature gameobjects this one may be placed over
+};
+
+static constexpr CampPlacement CampPlacements[] =
+{
+    { 1307229, { } },                   // Camp Chair
+    { 1307230, { } },                   // Camp Tent
+    { 1307234, { } },                   // Enchanted Lute
+    { 1307239, { } },                   // Faction Banner
+    { 1307240, { } },                   // Faction Banner
+    { 1307244, { } },                   // First Aid Kit
+    { 1307245, { } },                   // Fish Bowl
+    { 1307251, { } },                   // Incense Candle
+    { 1307254, { } },                   // Lodestone
+    { 1307259, { } },                   // Mana Well
+    { 1307266, { } },                   // Reagent Bot
+    { 1307223, { 651952 } },            // Arcane Salvager, over an Enchanted Lute
+    { 1307242, { 651948 } },            // Fermenter, over a Mana Well
+    { 1307243, { 612275 } },            // Field Guide, over a Camp Chair
+    { 1307246, { 651954 } },            // Fishing Hut, over a Fish Bowl
+    { 1307247, { 651954 } },            // Fishing Rack, over a Fish Bowl
+    { 1307248, { 651955 } },            // Greenhouse, over an Incense Candle
+    { 1307255, { 612350, 612351 } },    // Loom, over a Faction Banner
+    { 1307261, { 651950 } },            // Master Forge, over a Sharpening Wheel
+    { 1307264, { 651956 } },            // Molten Foundry, over a Lodestone
+    { 1307265, { 651953 } },            // Plague Doctor's Laboratory, over a First Aid Kit
+};
+
+static CampPlacement const* FindCampPlacement(uint32 spellId)
+{
+    for (CampPlacement const& placement : CampPlacements)
+        if (placement.SpellId == spellId)
+            return &placement;
+    return nullptr;
+}
+
+class classic_spell_camp_feature_placement : public SpellScript
+{
+    // the player's feature next to 'fire' that this one is placed over, nullptr if none
+    GameObject* FindReplaced(GameObject* fire) const
+    {
+        CampPlacement const* placement = FindCampPlacement(GetSpellInfo()->Id);
+        if (!placement)
+            return nullptr;
+
+        for (uint32 entry : placement->Replaces)
+            if (entry)
+                if (GameObject* old = fire->FindNearestGameObject(entry, CAMP_FEATURE_RANGE))
+                    if (old->GetSpellId())
+                        return old;
+        return nullptr;
+    }
+
+    SpellCastResult CheckCast()
+    {
+        GameObject* fire = FindCampfire(GetCaster());
+        if (!fire || !fire->GetSpellId())   // no fire: the spell's own focus check says so; world campfires have no limit
+            return SPELL_CAST_OK;
+
+        SpellInfo const* fireSpell = sSpellMgr->GetSpellInfo(fire->GetSpellId(), DIFFICULTY_NONE);
+        if (!fireSpell || fireSpell->GetEffects().empty())
+            return SPELL_CAST_OK;
+
+        int32 limit = fireSpell->GetEffect(EFFECT_0).CalcValue();
+        if (limit <= 0 || FindReplaced(fire))
+            return SPELL_CAST_OK;
+
+        std::list<GameObject*> objects;
+        fire->GetGameObjectListWithEntryInGrid(objects, 0, CAMP_FEATURE_RANGE);
+        int32 placed = 0;
+        for (GameObject const* object : objects)
+            if (object->isSpawned() && FindCampPlacement(object->GetSpellId()))
+                ++placed;
+
+        return placed >= limit ? SPELL_FAILED_TOO_MANY_OF_ITEM : SPELL_CAST_OK;
+    }
+
+    void RemoveReplaced()
+    {
+        if (GameObject* fire = FindCampfire(GetCaster()))
+            if (GameObject* old = FindReplaced(fire))
+                old->DespawnOrUnsummon();
+    }
+
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(classic_spell_camp_feature_placement::CheckCast);
+        AfterCast += SpellCastFn(classic_spell_camp_feature_placement::RemoveReplaced);
     }
 };
 
@@ -265,10 +371,12 @@ struct classic_go_camp_chair : public GameObjectAI
 ## classic_spell_plainsrunning (1259918)
 ######*/
 
-// Classic 1.60 Tauren racial: "Gain 1% increased movement speed every 5 sec spent moving, up to a maximum of 30% increase. Taking
-// damage or standing still will reduce this effect." The racial is a 1 s periodic dummy (effect 0) with the step seconds and the
-// maximum in effects 1 and 2; the speed is the stacking aura Plainsrunning (1299038, +1% per stack). How fast it decays is not in
-// the spell data: here one stack per second standing still and five stacks when hit.
+// Classic 1.60 Tauren racial: "Gain 2% increased movement speed every 5 sec spent moving, up to a maximum of 60% increase. Taking
+// damage or standing still will reduce this effect." (WoW Forever beta notes 2026-10-26: was 1% up to 30%, and no longer adds mounted
+// speed; values in the hotfixes of 2026_10_27_05). The racial is a 1 s periodic dummy (effect 0, the percent per step) with the step
+// seconds and the maximum percent in effects 1 and 2; the speed is the stacking aura Plainsrunning (1299038, +2% per stack), so the
+// stack cap is the maximum divided by the step. How fast it decays is not in the spell data: here one stack per second standing still
+// and five stacks when hit.
 enum Plainsrunning
 {
     SPELL_PLAINSRUNNING_SPEED       = 1299038,
@@ -298,7 +406,7 @@ class classic_spell_plainsrunning : public AuraScript
     {
         Unit* target = GetTarget();
         int32 secondsPerStack = std::max(1, int32(GetEffect(EFFECT_1)->GetAmount()));
-        int32 maxStacks = std::max(1, int32(GetEffect(EFFECT_2)->GetAmount()));
+        int32 maxStacks = std::max(1, int32(GetEffect(EFFECT_2)->GetAmount()) / std::max(1, int32(GetEffect(EFFECT_0)->GetAmount())));
 
         uint64 health = target->GetHealth();
         bool hit = health < _lastHealth;
@@ -460,4 +568,5 @@ void AddSC_classic_go_scripts()
     RegisterGameObjectAI(classic_go_camp_chair);
     RegisterSpellScript(classic_spell_campfire_rest);
     RegisterSpellScript(classic_spell_boosted_rest);
+    RegisterSpellScript(classic_spell_camp_feature_placement);
 }

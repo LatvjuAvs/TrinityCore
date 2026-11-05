@@ -17,6 +17,7 @@
 
 #include "WorldSession.h"
 #include "CharacterCache.h"
+#include "ClassicSetRole.h"
 #include "Common.h"
 #include "DatabaseEnv.h"
 #include "Group.h"
@@ -331,6 +332,19 @@ void WorldSession::HandleSetRoleOpcode(WorldPackets::Party::SetRole& packet)
     WorldPackets::Party::RoleChangedInform roleChangedInform;
 
     Group* group = GetPlayer()->GetGroup(packet.PartyIndex);
+
+    ClassicSetRole::Request request;
+    request.InGroup = group != nullptr;
+    request.TargetIsSelf = packet.TargetGUID == GetPlayer()->GetGUID();
+    request.TargetIsMember = group && group->IsMember(packet.TargetGUID);
+    request.SenderIsLeaderOrAssistant = group && (group->IsLeader(GetPlayer()->GetGUID()) || group->IsAssistant(GetPlayer()->GetGUID()));
+    request.Role = packet.Role;
+    if (!ClassicSetRole::IsAllowed(request))
+    {
+        TC_LOG_DEBUG("network", "CMSG_SET_ROLE: {} may not set role {} on {}, ignored", GetPlayerInfo(), uint32(packet.Role), packet.TargetGUID.ToString());
+        return;
+    }
+
     uint8 oldRole = group ? group->GetLfgRoles(packet.TargetGUID) : 0;
     if (oldRole == packet.Role)
         return;

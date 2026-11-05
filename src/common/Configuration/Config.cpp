@@ -178,7 +178,8 @@ bool ConfigMgr::LoadAdditionalDir(std::string const& dir, bool keepOnReload, std
     if (!fs::exists(dirPath) || !fs::is_directory(dirPath))
         return true;
 
-    // Local: name order, so a later file reliably overrides an earlier one (the directory's own order depends on the file system).
+    // Load in name order, so a later file (zz-9-...) always overrides an earlier one. The order of the directory listing
+    // itself depends on the file system and is not alphabetical everywhere.
     std::vector<fs::path> configFiles;
     for (fs::directory_entry const& f : fs::recursive_directory_iterator(dirPath))
     {

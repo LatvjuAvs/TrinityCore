@@ -640,6 +640,8 @@ Optional<uint32> LootRoll::GetItemDisenchantLootId() const
         return bonusData.DisenchantLootId;
 
     ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(m_lootItem->itemid);
+    if (Item::HasOwnDisenchantLoot(itemTemplate))
+        return itemTemplate->GetId();
 
     // ignore temporary item level scaling (pvp or timewalking)
     uint32 itemLevel = Item::GetItemLevel(itemTemplate, bonusData, bonusData.RequiredLevel, 0, 0, 0, 0, false, 0, 0);
@@ -668,7 +670,12 @@ Optional<uint16> LootRoll::GetItemDisenchantSkillRequired() const
 
     ItemDisenchantLootEntry const* disenchantLoot = Item::GetBaseDisenchantLoot(itemTemplate, bonusData.Quality, itemLevel);
     if (!disenchantLoot)
+    {
+        if (Item::HasOwnDisenchantLoot(itemTemplate))
+            return 0;
+
         return {};
+    }
 
     return disenchantLoot->SkillRequired;
 }
@@ -1194,7 +1201,7 @@ bool Loot::hasItemFor(Player const* player) const
             return true;
 
     if (NotNormalLootItemList const* ffaItems = Trinity::Containers::MapGetValuePtr(GetPlayerFFAItems(), player->GetGUID()))
-        if (std::ranges::any_of(*ffaItems, &NotNormalLootItem::is_looted))
+        if (std::ranges::any_of(*ffaItems, [](NotNormalLootItem const& ffaItem) { return !ffaItem.is_looted; }))
             return true;
 
     return false;

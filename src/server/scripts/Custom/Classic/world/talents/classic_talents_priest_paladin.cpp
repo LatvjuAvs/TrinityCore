@@ -22,6 +22,8 @@
 #include "ScriptMgr.h"
 #include "GameTime.h"
 #include "Player.h"
+#include "Random.h"
+#include "DB2Stores.h"
 #include "Spell.h"
 #include "SpellAuraEffects.h"
 #include "SpellHistory.h"
@@ -1159,8 +1161,101 @@ class classic_spell_pal_sacred_shield : public AuraScript
     TimePoint _nextShield = TimePoint::min();
 };
 
+// Divine Shield (642, 1020), Blessing of Protection (1022, 5599, 10278), Lay on Hands (633, 2800, 10310): vanilla puts Forbearance (1 minute) on the
+// target and refuses these spells on a target that has it. The retail Forbearance scripts check the retail marker spell in the spell data and
+// are bound to rank 1 only, so a Classic cast either never applied it or, on the higher ranks, never did. Applying it again on rank 1 only
+// refreshes the aura.
+class classic_spell_pal_forbearance : public SpellScript
+{
+    static constexpr uint32 SPELL_PALADIN_FORBEARANCE_DEBUFF = 25771;
+
+    bool Validate(SpellInfo const* /*spellInfo*/) override
+    {
+        return ValidateSpellInfo({ SPELL_PALADIN_FORBEARANCE_DEBUFF });
+    }
+
+    SpellCastResult CheckTarget()
+    {
+        Unit* target = GetExplTargetUnit() ? GetExplTargetUnit() : GetCaster();
+        if (target->HasAura(SPELL_PALADIN_FORBEARANCE_DEBUFF))
+            return SPELL_FAILED_TARGET_AURASTATE;
+        return SPELL_CAST_OK;
+    }
+
+    void TriggerForbearance() const
+    {
+        GetCaster()->CastSpell(GetHitUnit(), SPELL_PALADIN_FORBEARANCE_DEBUFF, CastSpellExtraArgsInit{
+            .TriggerFlags = TRIGGERED_IGNORE_CAST_IN_PROGRESS | TRIGGERED_DONT_REPORT_CAST_ERROR,
+            .TriggeringSpell = GetSpell()
+        });
+    }
+
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(classic_spell_pal_forbearance::CheckTarget);
+        AfterHit += SpellHitFn(classic_spell_pal_forbearance::TriggerForbearance);
+    }
+};
+
+// Rank of a talent: Forever's talents are trait nodes with one spell, the ranks are held on the node entry of the active spec's trait config.
+// Returns 0 when the player does not have the talent.
+static int32 GetClassicTalentRank(Player const* player, uint32 spellId)
+{
+    UF::TraitConfig const* config = player->GetClassicSpecGroupConfig(player->GetActiveTalentGroup() == 1);
+    if (!config)
+        return 0;
+
+    for (UF::TraitEntry const& entry : config->Entries)
+    {
+        TraitNodeEntryEntry const* nodeEntry = sTraitNodeEntryStore.LookupEntry(entry.TraitNodeEntryID);
+        TraitDefinitionEntry const* definition = nodeEntry ? sTraitDefinitionStore.LookupEntry(nodeEntry->TraitDefinitionID) : nullptr;
+        if (definition && uint32(definition->SpellID) == spellId)
+            return entry.Rank + entry.GrantedRanks + entry.BonusRanks;
+    }
+    return 0;
+}
+
+// 20210 - Illumination: "After getting a critical effect from your Flash of Light, Holy Light, or Holy Shock heal spell, gives you a 20% chance
+// per rank to gain mana equal to the base cost of the spell." The client aura procs the dummy-only spell 18350, so nothing returned mana. VMaNGOS
+// casts the energize 20272 on the paladin with the mana cost of the spell as the amount; the chance is 20% x the talent rank (read from the node).
+// The cost of the heal is read from the cast; the Holy Shock heals are triggered with no cost of their own and give nothing here.
+class classic_spell_pal_illumination : public AuraScript
+{
+    static constexpr uint32 SPELL_PALADIN_ILLUMINATION_ENERGIZE = 20272;
+
+    bool Validate(SpellInfo const* /*spellInfo*/) override
+    {
+        return ValidateSpellInfo({ SPELL_PALADIN_ILLUMINATION_ENERGIZE });
+    }
+
+    bool CheckProc(ProcEventInfo& eventInfo)
+    {
+        Spell const* spell = eventInfo.GetProcSpell();
+        Player const* paladin = GetTarget()->ToPlayer();
+        return spell && paladin && spell->GetPowerTypeCostAmount(POWER_MANA).value_or(0) > 0
+            && roll_chance(20 * std::max(1, GetClassicTalentRank(paladin, GetId())));
+    }
+
+    void HandleProc(AuraEffect const* /*aurEff*/, ProcEventInfo& eventInfo)
+    {
+        PreventDefaultAction();
+        CastSpellExtraArgs args(TRIGGERED_FULL_MASK);
+        args.AddSpellBP0(*eventInfo.GetProcSpell()->GetPowerTypeCostAmount(POWER_MANA));
+        GetTarget()->CastSpell(GetTarget(), SPELL_PALADIN_ILLUMINATION_ENERGIZE, args);
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(classic_spell_pal_illumination::CheckProc);
+        OnEffectProc += AuraEffectProcFn(classic_spell_pal_illumination::HandleProc, EFFECT_0, SPELL_AURA_PROC_TRIGGER_SPELL);
+    }
+};
+
+void AddSC_classic_spells_priest();
+
 void AddSC_classic_talents_priest_paladin()
 {
+    AddSC_classic_spells_priest();
     // Priest
     RegisterSpellScript(classic_spell_pri_inspiration);
     RegisterSpellScript(classic_spell_pri_blessed_recovery);
@@ -1191,4 +1286,6 @@ void AddSC_classic_talents_priest_paladin()
     RegisterSpellScript(classic_spell_pal_improved_seal_of_fury);
     RegisterSpellScript(classic_spell_pal_holy_light_flash_of_light);
     RegisterSpellScript(classic_spell_pal_sacred_shield);
+    RegisterSpellScript(classic_spell_pal_forbearance);
+    RegisterSpellScript(classic_spell_pal_illumination);
 }

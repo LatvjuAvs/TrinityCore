@@ -19,6 +19,7 @@
 #include "ByteBuffer.h"
 #include "ClassicOpcodes.h"
 #include "Containers.h"
+#include "DB2LegacyLayout.h"
 #include "DB2LoadInfo.h"
 #include "DatabaseEnv.h"
 #include "Hash.h"
@@ -678,6 +679,9 @@ uint32 DB2Manager::LoadStores(std::string const& dataPath, LocaleConstant defaul
 
     if (!availableDb2Locales[defaultLocale])
         return 0;
+
+    // game tables extracted from a client up to 70685 have the old SpellDuration layout: rewrite them into the 70707 layout the server reads
+    DB2LegacyLayout::UpgradeLegacyDB2Files(db2Path);
 
     auto LOAD_DB2 = [&]<typename T>(DB2Storage<T>& store)
     {
@@ -1347,6 +1351,16 @@ void DB2Manager::IndexLoadedStores()
         for (auto& [curveId, curvePoints] : unsortedPoints)
         {
             std::ranges::sort(curvePoints, {}, &CurvePointEntry::OrderIndex);
+
+            // Classic 1.60 (70707): the TransmogCost curve 106855 has a leftover point (60, 1) at OrderIndex 2, between (2, 50)
+            // and (3, 50). Evaluated in OrderIndex order every level from 3 to 59 interpolates towards it, so the outfit price
+            // the server works out is far below the one the client shows and every outfit save is refused. Interpolated
+            // curves are looked up by X, so put their points in X order (OrderIndex still decides between equal X).
+            // Bezier curves (type 2) use their points as control points in OrderIndex order and are left alone.
+            if (sCurveStore.AssertEntry(curveId)->Type != 2
+                && !std::ranges::is_sorted(curvePoints, {}, [](CurvePointEntry const* point) { return point->Pos.X; }))
+                std::ranges::stable_sort(curvePoints, {}, [](CurvePointEntry const* point) { return point->Pos.X; });
+
             std::vector<DBCPosition2D>& points = _curvePoints[curveId];
             points.resize(curvePoints.size());
             std::ranges::transform(curvePoints, points.begin(), &CurvePointEntry::Pos);

@@ -362,6 +362,7 @@ class TC_GAME_API Spell
         void EffectChargeDest();
         void EffectProspecting();
         void EffectMilling();
+        void EffectSalvageItem();
         void EffectRenamePet();
         void EffectSendTaxi();
         void EffectKnockBack();

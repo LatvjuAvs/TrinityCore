@@ -528,12 +528,9 @@ bool Aura::CanPeriodicTickCrit() const
     if (GetSpellInfo()->HasAttribute(SPELL_ATTR2_CANT_CRIT))
         return false;
 
-    // Classic 1.60 (vanilla): damage and healing over time never critically strike (Renew, Rejuvenation, Corruption, Immolate...).
-    // Ids from 1000000 on are spells new to Forever and keep their client attributes.
-    static constexpr uint32 FirstForeverSpellId = 1000000;
-    if (GetId() < FirstForeverSpellId)
-        return false;
-
+    // Classic 1.60 (WoW Forever): the client's own flag decides. Forever gave its damage over time spells the flag (70707:
+    // Corruption 172, Curse of Agony 980, Shadow Word: Pain 589, Immolate 348 have Attributes8 0x200), so they can crit; the
+    // vanilla rule "no periodic crits" kept here before held them back (Azeldof, 2026-11-02). Spells without the flag still can't.
     if (GetSpellInfo()->HasAttribute(SPELL_ATTR8_PERIODIC_CAN_CRIT))
         return true;
 

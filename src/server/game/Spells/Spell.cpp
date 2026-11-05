@@ -24,6 +24,7 @@
 #include "BattlePetMgr.h"
 #include "CellImpl.h"
 #include "CharmInfo.h"
+#include "ClassicAutoShot.h"
 #include "ClassicOpcodes.h"
 #include "CollectionMgr.h"
 #include "CombatLogPackets.h"
@@ -764,7 +765,7 @@ void Spell::SelectSpellTargets()
                             case TARGET_SELECT_CATEGORY_NEARBY:
                             case TARGET_SELECT_CATEGORY_CONE:
                             case TARGET_SELECT_CATEGORY_AREA:
-                            case TARGET_SELECT_CATEGORY_LINE:
+                            case TARGET_SELECT_CATEGORY_RECT:
                                 return true;
                             default:
                                 break;
@@ -970,7 +971,7 @@ void Spell::SelectEffectImplicitTargets(SpellEffectInfo const& spellEffectInfo, 
 
             SelectImplicitTrajTargets(spellEffectInfo, targetType);
             break;
-        case TARGET_SELECT_CATEGORY_LINE:
+        case TARGET_SELECT_CATEGORY_RECT:
             SelectImplicitLineTargets(spellEffectInfo, targetType, targetIndex, effectMask);
             break;
         case TARGET_SELECT_CATEGORY_DEFAULT:
@@ -1970,6 +1971,7 @@ void Spell::SelectImplicitLineTargets(SpellEffectInfo const& spellEffectInfo, Sp
     SpellTargetObjectTypes objectType = targetType.GetObjectType();
     SpellTargetCheckTypes selectionType = targetType.GetCheckType();
     Position const* dst = nullptr;
+    SpellRange radius = spellEffectInfo.CalcRadius(m_caster, targetIndex) * m_spellValue->RadiusMod;
     switch (targetType.GetReferenceType())
     {
         case TARGET_REFERENCE_TYPE_SRC:
@@ -1977,6 +1979,7 @@ void Spell::SelectImplicitLineTargets(SpellEffectInfo const& spellEffectInfo, Sp
             break;
         case TARGET_REFERENCE_TYPE_DEST:
             dst = m_targets.GetDstPos();
+            radius.Max = std::min(radius.Max, m_caster->GetExactDist2d(dst));
             break;
         case TARGET_REFERENCE_TYPE_CASTER:
             dst = m_caster;
@@ -1990,11 +1993,10 @@ void Spell::SelectImplicitLineTargets(SpellEffectInfo const& spellEffectInfo, Sp
     }
 
     ConditionContainer* condList = spellEffectInfo.ImplicitTargetConditions.get();
-    SpellRange radius = spellEffectInfo.CalcRadius(m_caster, targetIndex) * m_spellValue->RadiusMod;
 
     if (uint32 containerTypeMask = GetSearcherTypeMask(m_spellInfo, spellEffectInfo, objectType, condList))
     {
-        Trinity::WorldObjectSpellLineTargetCheck check(m_caster, dst, m_spellInfo->Width ? m_spellInfo->Width : m_caster->GetCombatReach(), radius, m_caster, m_spellInfo, selectionType, condList, objectType);
+        Trinity::WorldObjectSpellLineTargetCheck check(m_caster, dst, m_spellInfo->Width ? m_spellInfo->Width / 2.0f : m_caster->GetCombatReach(), radius, m_caster, m_spellInfo, selectionType, condList, objectType);
         Trinity::WorldObjectListSearcher<Trinity::WorldObjectSpellLineTargetCheck> searcher(m_caster, targets, check, containerTypeMask);
         SearchTargets<Trinity::WorldObjectListSearcher<Trinity::WorldObjectSpellLineTargetCheck>>(searcher, containerTypeMask, m_caster, m_caster, radius.Max);
 
@@ -4919,9 +4921,21 @@ void Spell::SendSpellGo()
     }
 
     // The missile is launched by this packet: without the ammo display the client draws it as a white box. Shots whose cast start is
-    // never sent (Auto Shot's repeats, other triggered ranged spells) would otherwise carry display 0.
+    // never sent (Auto Shot's repeats, other triggered ranged spells) were left with display 0 (PC 20 Oct, squares on some of a hunter's moves).
     if (castFlags & CAST_FLAG_PROJECTILE)
+    {
         castData.AmmoDisplayID = GetSpellCastDataAmmo();
+        static std::mutex missileLogMutex;
+        static std::unordered_set<uint32> missileLogged;
+        bool first;
+        {
+            std::lock_guard<std::mutex> lock(missileLogMutex);
+            first = m_caster->IsPlayer() && missileLogged.insert(m_spellInfo->Id).second;
+        }
+        if (first)
+            TC_LOG_INFO("playerbot.v2", "[missile] spell {} visual {} ammo display {} cast flags 0x{:X} triggered 0x{:X}", m_spellInfo->Id,
+                m_SpellVisual.SpellXSpellVisualID, castData.AmmoDisplayID, castFlags, uint32(_triggeredCastFlags));
+    }
 
     packet.LogData.Initialize(this);
 
@@ -4989,14 +5003,14 @@ int32 Spell::GetSpellCastDataAmmo()
             if (ammoInventoryType == INVTYPE_THROWN)
             {
                 ammoDisplayID = pItem->GetDisplayId(playerCaster);
-                // A thrown weapon with the generic 1.60 display, or none, is drawn by the client as a white square.
+                // A thrown weapon with the generic 1.60 display, or none, is drawn by the client as a white square (UBRS and Red Cloud Mesa, 20 Oct).
                 if (!ammoDisplayID || ammoDisplayID >= 500000)
                     ammoDisplayID = 23211;
             }
             else if (ItemTemplate const* ammo = sObjectMgr->GetItemTemplate(playerCaster->GetAmmoId()))   // Classic 1.60 ammo slot
             {
                 // The ammo's own display, as a real player's cast sends it. The generic 1.60 ammo display (737992 / 737993) has no model and the
-                // client draws a white box for it; bots take ammo that has its own display (Player::AutoSelectAmmo), so
+                // client draws a white box for it (PC log 20 Oct); bots take ammo that has its own display (Player::AutoSelectAmmo), so
                 // this is the fallback only: an arrow model, for bullets too (every classic bullet has the generic display).
                 ammoDisplayID = Player::GetAmmoDisplayId(ammo);
                 if (!Player::HasDrawableAmmoDisplay(ammo))
@@ -5927,6 +5941,10 @@ SpellCastResult Spell::CheckCast(bool strict, int32* param1 /*= nullptr*/, int32
             }
 
             if ((IsAutoRepeat() || m_spellInfo->CategoryId == 76) && !m_caster->ToUnit()->isAttackReady(RANGED_ATTACK))
+                return SPELL_FAILED_DONT_REPORT;
+
+            // Classic 1.60: Auto Shot waits for its half-second wind-up like it waits for the swing timer (queued, shot on a later update)
+            if (m_spellInfo->Id == ClassicAutoShot::SpellId && !m_caster->ToUnit()->IsClassicAutoShotWindupDone())
                 return SPELL_FAILED_DONT_REPORT;
         }
     }
@@ -9742,7 +9760,7 @@ bool WorldObjectSpellLineTargetCheck::operator()(WorldObject* target) const
     if (!_position.HasInLine(target, target->GetCombatReach(), _lineWidth))
         return false;
 
-    return WorldObjectSpellTargetCheck::operator ()(target);
+    return WorldObjectSpellAreaTargetCheck::operator ()(target);
 }
 
 void SelectRandomInjuredTargets(std::list<WorldObject*>& targets, size_t maxTargets, bool prioritizePlayers, Unit const* prioritizeGroupMembersOf /*= nullptr*/)

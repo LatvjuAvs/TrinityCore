@@ -585,8 +585,17 @@ void WorldSession::HandleTransmogOutfitUpdateSlots(WorldPackets::Transmogrificat
 
     _player->UpdateTransmogOutfitSlots(transmogOutfitUpdateSlots.OutfitID, transmogOutfitUpdateSlots.Slots);
 
-    if (transmogOutfitUpdateSlots.OutfitID == _player->m_activePlayerData->TransmogMetadata->TransmogOutfitID)
-        _player->EquipTransmogOutfit(transmogOutfitUpdateSlots.OutfitID, TransmogSituationTrigger::TransmogUpdate, {});
+    // Classic client (70707/70755): it never asks to wear an outfit (no equip outfit cast is sent when an outfit is picked
+    // in the list), so an outfit was only shown when it already was the worn one. New characters wear none (id 0), so a
+    // saved outfit never showed. Saving an outfit at the transmogrifier now also puts it on.
+    _player->EquipTransmogOutfit(transmogOutfitUpdateSlots.OutfitID, TransmogSituationTrigger::TransmogUpdate, {});
+
+    // SMSG_UPDATE_OBJECT must be received by client before transmog packet for UI to properly update
+    Player::ValuesUpdateForPlayerWithMaskSender sendUpdateObject(_player);
+    sendUpdateObject.ActivePlayerMask.MarkChanged(&UF::ActivePlayerData::TransmogOutfits);
+    sendUpdateObject.ActivePlayerMask.MarkChanged(&UF::ActivePlayerData::TransmogMetadata);
+    sendUpdateObject.ActivePlayerMask.MarkChanged(&UF::ActivePlayerData::ViewedOutfit);
+    sendUpdateObject(_player);
 
     WorldPackets::Transmogrification::TransmogOutfitSlotsUpdated transmogOutfitSlotsUpdated;
     transmogOutfitSlotsUpdated.TransmogOutfitID = transmogOutfitUpdateSlots.OutfitID;

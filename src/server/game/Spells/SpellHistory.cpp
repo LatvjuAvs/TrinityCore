@@ -516,7 +516,14 @@ void SpellHistory::StartCooldown(SpellInfo const* spellInfo, uint32 itemId, Spel
 
         // no cooldown after applying spell mods
         if (cooldown == Duration::zero() && categoryCooldown == Duration::zero())
+        {
+            // the cooldown event of a "cooldown on event" spell (Stealth) still has to end the waiting (on hold) entry, or the spell
+            // stays "not ready" until the next login
+            auto itr = _spellCooldowns.find(spellInfo->Id);
+            if (itr != _spellCooldowns.end() && itr->second.OnHold)
+                EraseCooldown(itr);
             return;
+        }
     }
 
     TimePoint curTime = time_point_cast<Duration>(GameTime::GetTime<Clock>());
@@ -571,8 +578,11 @@ void SpellHistory::SendCooldownEvent(SpellInfo const* spellInfo, uint32 itemId /
 void SpellHistory::AddCooldown(uint32 spellId, uint32 itemId, TimePoint cooldownEnd, uint32 categoryId, TimePoint categoryEnd, bool onHold /*= false*/)
 {
     CooldownEntry& cooldownEntry = _spellCooldowns[spellId];
-    // scripts can start multiple cooldowns for a given spell, only store the longest one
-    if (cooldownEnd > cooldownEntry.CooldownEnd || categoryEnd > cooldownEntry.CategoryEnd || onHold)
+    // scripts can start multiple cooldowns for a given spell, only store the longest one.
+    // An entry on hold (cooldown on event, e.g. Stealth) is always replaced by the real cooldown when the event comes: its end time is only
+    // a placeholder (cast time + base cooldown), so a cooldown shortened by spell mods (Camouflage on Stealth, -2..-6 s) that ends earlier
+    // would otherwise leave the spell on hold, "not ready" until the next login.
+    if (cooldownEnd > cooldownEntry.CooldownEnd || categoryEnd > cooldownEntry.CategoryEnd || onHold || cooldownEntry.OnHold)
     {
         cooldownEntry.SpellId = spellId;
         cooldownEntry.CooldownEnd = cooldownEnd;
