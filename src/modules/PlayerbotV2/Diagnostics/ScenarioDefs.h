@@ -36,7 +36,16 @@ struct ScenarioMember
 };
 
 // Parity: the damage_parity family (DamageParity.h) - one bot, a target dummy, measurements; done when its legs have run.
-enum class ScenarioGoalKind : std::uint8_t { KillCreature, Parity };
+// FollowRoute: the stand-in walks ScenarioDef::route like a player and the squad must be with him at every point (Fleet/OwnerCatchUp.h).
+enum class ScenarioGoalKind : std::uint8_t { KillCreature, Parity, FollowRoute };
+
+// A point of a FollowRoute walk. The stand-in walks to it; where no walking route leads there he is set down on it, as a player who takes
+// a jump the navmesh does not have, and the squad has to come after him.
+struct ScenarioRoutePoint
+{
+    char const* label;
+    float x, y, z;
+};
 
 struct ScenarioCheckpoint
 {
@@ -95,6 +104,11 @@ struct ScenarioDef
     // following the main tank and attacking what the tank attacks (a player who only presses "assist"). The group logic still sees a
     // bot-led group. nullptr = every member runs its own bot logic.
     char const* stand_in = nullptr;
+    // A player-led run: the stand-in is made the group leader and counts as a player (Scenario::PlaysAsHuman), so the squad plays as the
+    // owner's group does - the dungeon autopilot stands down, the bots follow him, the group fight joins his fights. The runner plays him
+    // like the owner: he walks the dungeon's route, stops at the next pack, says "pull back" with it selected (the tank pulls it to him),
+    // "attack" once the tank has it, fights the tank's target, and walks on when the group has its health and mana back.
+    bool player_lead = false;
     // Checkpoint starts (`scenario run <name>@<key>`): the squad enters at the entrance as usual, then is moved to a spot in sight of the first
     // spawn of the checkpoint's creature (a boss or a pack's mob) and plays on from there, bot-led and with no Hold, so a run does not replay
     // the part that is already solved. The goal and the first-death rule stay. Earlier bosses stay alive in the instance.
@@ -102,6 +116,17 @@ struct ScenarioDef
     // A goal boss with no spawn row in the creature table (a script summons it: Ragnaros, by Majordomo): the lair it is summoned at
     // (lair_z != 0). The runner finds the room from it and summons the boss itself, as the instance script does. No DB change.
     float lair_x = 0.f, lair_y = 0.f, lair_z = 0.f, lair_o = 0.f;
+    // A game object the raid leader uses to start the fight (Chromaggus' lever 179148 opens his side door; until then the script keeps him
+    // unattackable): when the attack is due the main tank uses the nearest one within 200 y, and the attack waits for the boss to become
+    // attackable (up to 30 s). 0 = none.
+    std::uint32_t start_object = 0;
+    // FollowRoute: the points the stand-in walks, in order (on `map`, starting from x, y, z).
+    std::vector<ScenarioRoutePoint> route;
+    // Orders an owner gives that a bot-only squad has nobody to give. yes_fear: the squad was told "yes fear" (Fear and Scare Beast allowed
+    // in the dungeon; Scenario::MarkYesFear). focus_heal_tank: the healer was told "focus heal <tank>" (BotAI::heal_only); it heals the tank
+    // and itself only. Both are taken back when the run ends, since the squad characters are reused.
+    bool yes_fear = false;
+    bool focus_heal_tank = false;
 };
 
 // The party every dungeon scenario uses: the shape of the owner's own (tank, healer, mage, rogue) plus a hunter for the fifth. The same
@@ -133,22 +158,40 @@ struct DungeonRow
 
 // Ordered by level, lowest first: `runall` re-levels the shared party for each row, and a character is only ever levelled up.
 // Entrances are the Classic areatrigger_teleport targets; levels are the dungeon's usual range; the boss is the first one on the way in.
-// Dire Maul, Stratholme, Scholomance, Sunken Temple, Maraudon and Blackrock Spire are not here yet: several entrances or a first boss
-// that is not on the way in (add them once their routes have been looked at).
+// The two Forever dungeons enter by their server-side area triggers (world_safe_locs 1104100 / 1104102). In a dungeon with several wings
+// or entrances each wing gets its own row from the entrance nearest its first fixed-spawn boss: a boss that flees (Pusillin), a rare on a
+// pool (Skul, Hearthsinger Forresten), a summon (Timmy, the Ramstein waves) or one hidden until an event (the Sunken Temple dragons wait
+// for the six trolls) is never the goal. Upper Blackrock Spire is not here: its door needs the Seal of Ascension, which no bot carries.
 inline constexpr DungeonRow kDungeons[] = {
     { "rfc_oggleflint",       "Ragefire Chasm: level 14 party to Oggleflint",              389,     0.797643f,   -8.23429f,  -15.5288f, 270.f, 14, 11517, "Oggleflint",          15 },
-    { "wc_cobrahn",           "Wailing Caverns: level 18 party to Lord Cobrahn",           43,   -158.441f,   131.601f,  -74.2552f, 335.f, 18,  3669, "Lord Cobrahn",       20 },
+    { "hot_faldrim",          "Hall of Thanes: level 16 party to Faldrim Anvilmar",        3065,   -95.62f,     -0.16f,    510.94f,     0.f, 16, 261306, "Faldrim Anvilmar",  20 },
+    { "rol_witherfang",       "Ruins of Lordaeron: level 18 party to Witherfang",          2999,  1804.15f,   149.174f,    70.399f,  266.f, 18, 250483, "Witherfang",        20 },
+    { "wc_cobrahn",           "Wailing Caverns: level 18 party to Lord Cobrahn",           43,   -158.441f,   131.601f,  -74.2552f, 335.f, 18,  3669, "Lord Cobrahn",       25 },
     { "deadmines_rhahkzor",   "Deadmines: level 21 party to Rhahk'Zor",                    36,    -14.5732f, -385.475f,   62.4561f,  90.f, 21,   644, "Rhahk'Zor",          20 },
     { "sfk_rethilgore",       "Shadowfang Keep: level 24 party to Rethilgore",             33,   -228.191f,  2111.41f,    76.8904f,  70.f, 24,  3914, "Rethilgore",         15 },
     { "bfd_ghamoora",         "Blackfathom Deeps: level 26 party to Ghamoo-ra",            48,   -150.234f,   106.594f,  -39.779f,  255.f, 26,  4887, "Ghamoo-ra",          20 },
     { "stockade_targorr",     "Stormwind Stockade: level 27 party to Targorr the Dread",   34,     48.9849f,    0.483882f, -16.3942f, 360.f, 27,  1696, "Targorr the Dread",  15 },
     { "smgraveyard_vishas",   "Scarlet Monastery Graveyard: level 30 party to Vishas",     189,  1687.27f,   1050.09f,    18.6773f,  90.f, 30,  3983, "Interrogator Vishas",15 },
     { "rfk_aggem",            "Razorfen Kraul: level 31 party to Aggem Thorncurse",        47,   1942.27f,   1544.23f,    83.3055f,  75.f, 31,  4424, "Aggem Thorncurse",   20 },
-    { "gnomeregan_grubbis",   "Gnomeregan: level 32 party to Grubbis",                     90,   -329.098f,    -3.20722f, -152.851f, 170.f, 32,  7361, "Grubbis",            20 },
-    { "rfd_tutenkash",        "Razorfen Downs: level 40 party to Tuten'kash",              129,  2593.68f,   1111.23f,    50.9518f, 270.f, 40,  7355, "Tuten'kash",         25 },
+    { "gnomeregan_electrocutioner", "Gnomeregan: level 32 party to Electrocutioner 6000", 90, -329.098f, -3.20722f, -152.851f, 170.f, 32, 6235, "Electrocutioner 6000", 30 },
+    { "smlibrary_loksey",     "Scarlet Monastery Library: level 33 party to Houndmaster Loksey", 189, 253.672f, -206.624f, 18.6773f, 270.f, 33, 3974, "Houndmaster Loksey", 20 },
+    // The same run at level 36, the Library's own level: a failure at 33 that passes here is the low end of the level range, not a bot bug.
+    { "smlibrary_loksey36",   "Scarlet Monastery Library: level 36 party to Houndmaster Loksey", 189, 253.672f, -206.624f, 18.6773f, 270.f, 36, 3974, "Houndmaster Loksey", 20 },
+    { "smarmory_herod",       "Scarlet Monastery Armory: level 36 party to Herod",         189,  1608.1f,   -318.919f,   18.6714f, 270.f, 36,  3975, "Herod",              25 },
+    { "smcathedral_mograine", "Scarlet Monastery Cathedral: level 38 party to Mograine",   189,   853.179f, 1319.18f,    18.6714f,  90.f, 38,  3976, "Scarlet Commander Mograine", 25 },
+    { "rfd_glutton",          "Razorfen Downs: level 40 party to Glutton",                 129,  2593.68f,   1111.23f,    50.9518f, 270.f, 40,  8567, "Glutton",            25 },
     { "uldaman_revelosh",     "Uldaman: level 44 party to Revelosh",                       70,   -228.859f,    46.1018f,  -46.0186f,  90.f, 44,  6910, "Revelosh",           20 },
+    { "maraudon_noxxion",     "Maraudon (orange): level 46 party to Noxxion",              349,  1016.83f,  -458.52f,   -43.4737f, 360.f, 46, 13282, "Noxxion",            25 },
     { "zf_antusul",           "Zul'Farrak: level 48 party to Antu'sul",                    209,  1212.67f,    842.04f,      8.93346f, 360.f, 48,  8127, "Antu'sul",           25 },
+    { "st_mijan",             "Sunken Temple: level 50 party to Mijan",                    109,  -315.903f,  100.197f, -131.849f,  180.f, 50,  5717, "Mijan",              25 },
     { "brd_roccor",           "Blackrock Depths: level 54 party to Lord Roccor",           230,   456.929f,    34.0923f,  -68.0896f, 270.f, 54,  9025, "Lord Roccor",        20 },
+    { "lbrs_omokk",           "Lower Blackrock Spire: level 56 party to Highlord Omokk",   229,    78.3534f, -226.841f,   49.7662f, 270.f, 56,  9196, "Highlord Omokk",     25 },
+    { "dmeast_zevrim",        "Dire Maul East: level 56 party to Zevrim Thornhoof",        429,  -203.166f, -322.997f,   -2.72467f, 270.f, 56, 11490, "Zevrim Thornhoof",   25 },
+    { "dmwest_tendris",       "Dire Maul West: level 57 party to Tendris Warpwood",        429,    33.1083f,  158.977f,  -3.47126f,  45.f, 57, 11489, "Tendris Warpwood",   25 },
+    { "dmnorth_moldar",       "Dire Maul North: level 57 party to Guard Mol'dar",          429,   254.92f,   -19.463f,   -2.5596f,  315.f, 57, 14326, "Guard Mol'dar",      20 },
+    { "scholo_jandice",       "Scholomance: level 58 party to Jandice Barov",              289,   190.819f,   126.329f,  137.227f,  360.f, 58, 10503, "Jandice Barov",      25 },
+    { "stratlive_galford",    "Stratholme (main gate): level 58 party to Archivist Galford", 329, 3392.92f, -3395.03f, 143.135f,  90.f, 58, 10811, "Archivist Galford",  30 },
+    { "stratud_barthilas",    "Stratholme (service gate): level 58 party to Magistrate Barthilas", 329, 3590.87f, -3643.22f, 138.491f, 315.f, 58, 10435, "Magistrate Barthilas", 20 },
 };
 
 inline ScenarioDef MakeDungeonScenario(DungeonRow const& r)
@@ -224,6 +267,7 @@ struct RaidBossRow
     std::uint32_t keep_entry_b = 0, keep_entry_c = 0;   // two more entries staging leaves alive (a trio, the other Horsemen); see ScenarioDef::keep_entry
     std::uint8_t resist_school = 0;     // see ScenarioDef::resist_school
     std::uint32_t wear_entry = 0;       // see ScenarioDef::wear_entry
+    std::uint32_t start_object = 0;     // see ScenarioDef::start_object
 };
 
 // A row whose fight keeps two or three kinds of creature alive (the bug trio, the Four Horsemen): the extra ones, without spelling out
@@ -259,6 +303,13 @@ constexpr RaidBossRow Resist(RaidBossRow r, std::uint8_t school)
 constexpr RaidBossRow Wears(RaidBossRow r, std::uint32_t entry)
 {
     r.wear_entry = entry;
+    return r;
+}
+
+// A row whose fight starts when the raid leader uses a game object (ScenarioDef::start_object): Chromaggus' lever.
+constexpr RaidBossRow StartsWith(RaidBossRow r, std::uint32_t object_entry)
+{
+    r.start_object = object_entry;
     return r;
 }
 
@@ -326,6 +377,7 @@ inline ScenarioDef MakeRaidScenario(RaidBossRow const& r, RaidEntrance const& e,
     d.arrive_min_yards = r.arrive_min_yards;
     d.resist_school = r.resist_school;
     d.wear_entry = r.wear_entry;
+    d.start_object = r.start_object;
     d.order_attack = true;
     d.order_delay_ms = 20000;
     return d;
@@ -430,8 +482,15 @@ inline constexpr RaidBossRow kBwlBosses[] = {
       14601, "Ebonroc",             20 }, ScnItem::OnyxiaScaleCloak),
     Wears({ "bwl_flamegor", "Blackwing Lair: 40 level 60 raiders to Flamegor (Frenzy tranquilized, Wing Buffet, Shadow Flame cone)",
       11981, "Flamegor",            20 }, ScnItem::OnyxiaScaleCloak),
-    { "bwl_chromaggus", "Blackwing Lair: 40 level 60 raiders to Chromaggus (Brood Afflictions dispelled, Time Lapse tank swap)",
-      14020, "Chromaggus",          25 },
+    // Chromaggus stays unattackable behind his side door until the lever opens it (classic_boss_chromaggus.cpp UpdateAI): 4f7b18e3 failed with
+    // "the boss is not attackable" at the order. The main tank pulls the lever as a raid leader would.
+    // He casts Frenzy 23128 every 15 s (classic_boss_chromaggus.cpp; Enrage dispel type 9, which Tranquilizing Shot 19801 removes): a kill
+    // must have seen a shot, and every run reports how many (0.1.28g: two runs of 4 and 6 minutes logged no [raid_tranq] line at all).
+    // His two breaths are rolled per instance (2 of 5; Time Lapse, the off-tank swap check of 0018, is in 8 of the 20 pairs). A forced
+    // extra Time Lapse was tried (8d2fd499aa) and is not used: cast at his 60 s breath it pushed his own breath to right after it, when
+    // the raid had come out of hiding, and 26 raiders died to one Incinerate. The swap is checked in the runs whose roll has it.
+    StartsWith({ "bwl_chromaggus", "Blackwing Lair: 40 level 60 raiders to Chromaggus (Brood Afflictions dispelled, Time Lapse tank swap)",
+      14020, "Chromaggus",          25, 0, 1 }, 179148),
 };
 
 // Zul'Gurub, 20 raiders. Venoxis' four cobras and Hakkar's Sons stand for the fight; Thekal's Zath and Lor'Khan (the three must die together)
@@ -703,6 +762,38 @@ inline ScenarioDef MakeScorecardScenario()
     return d;
 }
 
+// ---- brm_follow: a player's group through Blackrock Mountain on foot (chris 2026-10-30) ----
+// The rogue leads like a player from the Blackrock Spire door at the top down to the Blackrock Depths door at the bottom, and back up. The
+// way down has drops the bots leap (follow_drop); the way up is where a player takes the chains and the jumps, which bots cannot: where
+// the rogue finds no walking route he is set down on the point, and the bots that cannot follow are brought to him (CatchUpToOwner). The
+// report says per point how long the squad took to gather and who walked and who was brought. Points are the instance portals' trigger
+// centres (hotfixes area_trigger 1466 / 1468): on the floor, and a bot standing in one does not zone (the client sends the trigger).
+inline ScenarioDef MakeBrmFollowScenario()
+{
+    ScenarioDef d{};
+    d.name = "brm_follow";
+    d.summary = "Blackrock Mountain on foot: level 60 party led like a player from the Spire door down to the Depths door and back up";
+    d.level = 60;
+    d.squad = StandardParty();
+    d.map = 0;
+    d.x = -7518.19f; d.y = -1239.13f; d.z = 285.743f;
+    d.o = 0.f;
+    d.goal = ScenarioGoalKind::FollowRoute;
+    d.goal_name = "";
+    d.timeout_ms = 20u * 60u * 1000u;
+    d.limits.expected_map = 0;
+    d.limits.bounds = { true, d.x - 700.f, d.x + 700.f, d.y - 700.f, d.y + 700.f, 0.f, 500.f };
+    // The gather check at each point (FollowRoute) is the test: a bot left on the other level while the rogue goes on is what it is
+    // about, so the tank-distance and stand-still rules are widened past the time the gather allows.
+    d.limits.stray_yards = 500.f;
+    d.limits.idle_ms = 120000;
+    d.stand_in = "Scnrogue";
+    d.player_lead = true;
+    d.route = { { "the Blackrock Depths door", -7176.63f, -937.667f, 168.706f },
+                { "the Blackrock Spire door", -7518.19f, -1239.13f, 285.743f } };
+    return d;
+}
+
 inline std::vector<ScenarioDef> const& ScenarioCatalogue()
 {
     static std::vector<ScenarioDef> const defs = []
@@ -714,7 +805,52 @@ inline std::vector<ScenarioDef> const& ScenarioCatalogue()
             // The Deadmines have a known floor plan: the box is the part of the instance the route to the first boss may use.
             if (std::string(r.name) == "deadmines_rhahkzor")
                 d.limits.bounds = { true, -420.f, 100.f, -900.f, -340.f, 0.f, 110.f };
+            // Gnomeregan reaches 720 y north of its entrance (Thermaplugg at y 670): the 600 y box ended at y 596.8, inside the
+            // Electrocutioner's hall, and failed a rogue fighting there (0.1.27 set A, out_of_bounds at (-531.4,596.9,-230.6)). The box
+            // is the map 90 creature and object spawns' extent (x -910..-361, y -140..721, z -334..-148) with 50 y around it.
+            if (std::string(r.name) == "gnomeregan_electrocutioner")
+                d.limits.bounds = { true, -960.f, -311.f, -190.f, 771.f, -384.f, -98.f };
+            // The same dungeon led like the owner leads his bots (ScenarioDef::player_lead): the rogue is the player, walks the route,
+            // calls the pulls and the attacks; the rest play as a player's group (the group fight, the autopilot stood down).
+            static std::deque<std::string> s_led_names;
+            std::string const base = r.name;
+            bool const led = base == "rfc_oggleflint" || base == "wc_cobrahn" || base == "sfk_rethilgore" || base == "deadmines_rhahkzor";
+            ScenarioDef l = d;
+            std::size_t const plain_at = v.size();
             v.push_back(std::move(d));
+            if (led)
+            {
+                s_led_names.push_back(base + "_led");
+                s_led_names.push_back(std::string(r.summary) + ", led like a player (the rogue walks, calls the pulls and the attacks)");
+                l.name = s_led_names[s_led_names.size() - 2].c_str();
+                l.summary = s_led_names.back().c_str();
+                l.stand_in = "Scnrogue";
+                l.player_lead = true;
+                // He pulls each pack within 30 y on its own, says "attack" when it is back with him and waits for health and mana
+                // after every fight: twice the bot-led run's time (rfc_oggleflint_led RC8: route point 23 of 54 at 835 s, five
+                // minutes of it waiting for mana; the bot-led run passes in 600-620 s).
+                l.timeout_ms *= 2;
+                // Ragefire, 40 minutes: RC10 reached route point 50 of 54 at 1737 s of its 1800, 54 of its 62 waits on the 60 % led rest.
+                if (base == "rfc_oggleflint")
+                    l.timeout_ms = 40u * 60u * 1000u;
+                v.push_back(std::move(l));
+            }
+            // The Library at 36 with an owner's two orders a bot-only squad never gets (test items 4 and 19 of the dungeon list): the
+            // healer told "focus heal" on the tank, and the squad told "yes fear" (the Tracking Hounds are beasts: the hunter's Scare Beast
+            // and the warrior's Intimidating Shout are allowed). The plain run shows the default, these show the orders working.
+            if (base == "smlibrary_loksey36")
+            {
+                ScenarioDef f = v[plain_at];
+                f.name = "smlibrary_loksey36_focusheal";
+                f.summary = "Scarlet Monastery Library: level 36 party to Loksey, the healer told 'focus heal' on the tank";
+                f.focus_heal_tank = true;
+                v.push_back(std::move(f));
+                ScenarioDef y = v[plain_at];
+                y.name = "smlibrary_loksey36_yesfear";
+                y.summary = "Scarlet Monastery Library: level 36 party to Loksey, the squad told 'yes fear'";
+                y.yes_fear = true;
+                v.push_back(std::move(y));
+            }
         }
         // Deadmines, entrance to Edwin VanCleef: Rhahk'Zor, Sneed, Gilnid, the door and cannon, Mr. Smite, Greenskin, VanCleef. The
         // floor plan box covers the whole instance (VanCleef's ship is at y -877). Bot-led, the standard five; a run of 45 minutes.
@@ -722,7 +858,10 @@ inline std::vector<ScenarioDef> const& ScenarioCatalogue()
             static constexpr DungeonRow kFull = { "deadmines_full", "Deadmines: level 21 party, entrance to Edwin VanCleef",
                                                   36, -14.5732f, -385.475f, 62.4561f, 90.f, 21, 639, "Edwin VanCleef", 45 };
             ScenarioDef d = MakeDungeonScenario(kFull);
-            d.limits.bounds = { true, -420.f, 100.f, -900.f, -340.f, 0.f, 110.f };
+            // The floor is under the cove, not at z 0: past the Iron Clad Door the route to Mr. Smite (route chain [37]-[40], z 0.14) crosses
+            // the cove's water, which the squad swims at its surface, z -0.0 over a bottom at -3 to -7 (deadmines_full 048360b9: all five
+            // out_of_bounds at (-90,-707) on the route to Smite, the run otherwise a VanCleef kill). Falling through the map lands far below.
+            d.limits.bounds = { true, -420.f, 100.f, -900.f, -340.f, -25.f, 110.f };
             d.full_clear = true;
             // In the order of the clear (creature entries from the Deadmines creature table: a wrong one is reported when the run starts).
             // Staging spots: waypoints of the Deadmines route chain (map 36, seq in brackets) 33-55 y of walk before each boss room.
@@ -745,6 +884,7 @@ inline std::vector<ScenarioDef> const& ScenarioCatalogue()
         v.push_back(MakeOnyScenario());
         v.push_back(MakeOnyDodgeScenario());
         v.push_back(MakeBwlRazorgoreScenario());
+        v.push_back(MakeBrmFollowScenario());
         for (ScenarioDef& d : MakeOtherRaidScenarios())
             v.push_back(std::move(d));
         // The names are built once and kept: ScenarioDef carries char const*.

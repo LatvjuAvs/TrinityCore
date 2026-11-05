@@ -83,6 +83,10 @@ namespace Playerbot::Raid {
         // Flamegor has no tank debuff in his script (boss_flamegor.cpp:71-121): only Wing Buffet / Shadow Flame / Frenzy. Tank facing cannot be
         // a stand rule: no justified coordinates (the dragons are pulled to wherever the tank stands).
         r.tankSwap.push_back({ 14601, 23340, 1 });                                // Ebonroc: Shadow of Ebonroc (boss_ebonroc.cpp:24,106)
+        // Firemaw: the tank takes a Flame Buffet stack every 1.8-3 s and cannot step out of his sight; at 8 (1,350 a hit) a clean off-tank,
+        // waiting out of sight (BreakSight, RaidEncounterData_BWL_Movement.cpp), takes him, and the old tank goes out of sight to drop them.
+        // The taker may carry 3 itself: it takes one or two on the walk out from cover, before its taunt is in reach.
+        r.tankSwap.push_back({ 11983, 23341, 8, 3 });
         // Wing Buffet halves the victim's threat (boss_firemaw.cpp:71-77) on all three: the tank that lost the drake taunts it back.
         r.retaunt.push_back(11983);
         r.retaunt.push_back(14601);
@@ -98,6 +102,10 @@ namespace Playerbot::Raid {
         // Brood Affliction: Bronze 23170 (boss_chromaggus.cpp:47) has no dispel type in the vanilla data (only Hourglass Sand 19183
         // removes it): no dispeller spends a cast on it.
         r.noDispel.push_back(23170);
+        // Hourglass Sand is the cure (its on-use spell 23645 removes 23170, spell_item.cpp spell_item_hourglass_sand). The affliction is a
+        // periodic stun (70532 SpellEffect: aura 23 every 5000 ms, triggering 23171, aura 12): bwl_chromaggus 0.1.28i logged 350 of 360
+        // "not hiding for the breath" lines as stunned, from the first breath window on, so the carriers stood in the breath.
+        r.cureItem.push_back({ 23170, 19183 });
         r.dispel.push_back({ 23153, DispelKind::Magic });                         // Brood Affliction: Blue  (boss_chromaggus.cpp:44) UNVERIFIED kind
         r.dispel.push_back({ 23154, DispelKind::Curse });                         // Brood Affliction: Black (boss_chromaggus.cpp:45) UNVERIFIED kind
         r.dispel.push_back({ 23155, DispelKind::Disease });                         // Brood Affliction: Red   (boss_chromaggus.cpp:46) UNVERIFIED kind; dying with it heals the boss
@@ -105,6 +113,11 @@ namespace Playerbot::Raid {
         // Breath debuffs that stay on the player (the breath itself is the aura spell): Time Lapse 23310 (aura,aura), Corrosive Acid 23313
         // (aura,aura), Ignite Flesh 23315 (aura,dummy), Frost Burn 23187 (damage,aura,...). Incinerate 23308/23309 is pure damage (effect 2)
         // -> there is nothing to dispel, the junior entry was removed.
+        // Time Lapse 23310 on his victim (70532 SpellEffect: stun, aura 12, and health -50%, aura 133; SpellMisc duration index 31, 8 s): the
+        // victim stands stunned at half health while he keeps hitting it, and a clean off-tank taunts him off. The off-tanks hide for the
+        // breath (RaidEncounterData_BWL_Movement.cpp), so they come out of it clean. bwl_chromaggus 0.1.28g run 4: Time Lapse at 120 s
+        // and 180 s, nobody taunted, the stunned tanks went from 74% to dead in 3 s (Mctankwa 124 s, Mctankwb 183 s, Mctankwa 188 s).
+        r.tankSwap.push_back({ 14020, 23310, 1 });
         // Frenzy 23128: Tranquilizing Shot is the PvE coordinator's (PlanTranq, any aura the shot removes). Chromaggus Frenzy every 15s (boss_chromaggus.cpp:52,385-394)
         // Elemental shield auras 22277-22281 (fire/frost/shadow/nature/arcane, -75% all, +1100% one school, changes every 20s) are on the
         // boss: needs a school-aware spell choice, see raid-research.md.

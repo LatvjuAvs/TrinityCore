@@ -35,6 +35,11 @@ bool Active();
 // The measuring dummy, which no fight can finish by design: the bot's give-up rules (opener stall, unkillable-target leash) leave it alone.
 bool IsDummy(ObjectGuid const& guid);
 
+// The support scorecard's dummy plays a raid boss: the bots read it as boss-ranked (NearbyUnit::is_boss_rank), so the tank and healer
+// rules that wait for a boss (Demoralizing Roar on a single target, the boss cooldowns, the raid boss opening wait) run as in a boss
+// fight. Its creature template (entry 1000, Classification Normal) is the world's and stays as it is.
+bool IsSupportBoss(ObjectGuid const& guid);
+
 // A level 63 hostile dummy `distance` y in front of the player, for `.playerbot proccheck` (no leg running). The caller despawns it.
 Creature* SpawnProcDummy(Player* p, float distance, std::string& error);
 

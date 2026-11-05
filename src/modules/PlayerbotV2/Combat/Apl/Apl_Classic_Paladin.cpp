@@ -260,7 +260,7 @@ void DoHammerOfJustice(ApPredicateContext const& ctx, BotIntentEmitter& e) { e.c
 
 // ======================= Healer =======================
 
-// Lay on Hands (1 h cooldown, drains all mana) is reserved for a tank at
+// Lay on Hands (20 min cooldown, drains all mana) is reserved for a tank at
 // critical health (the owner's "party member critical tank health", 20%) and
 // for the paladin itself; anyone else gets Flash of Light. Forbearance from
 // any paladin (member debuff list) blocks it.
@@ -412,6 +412,7 @@ ApRule const kHealerRules[] = {
     { ShouldLayOnHands,          DoLayOnHands,          "classic_pal_heal:lay_on_hands" },
     { ShouldDivineFavor,         DoDivineFavor,         "classic_pal_heal:divine_favor" },
     { ShouldHolyShock,           DoHolyShock,           "classic_pal_heal:holy_shock" },
+    { ClassicHeal::ShouldControlDispel, ClassicHeal::DoControlDispel, "classic_pal_heal:cleanse_control" },   // a hexed tank holds no threat
     { ShouldFlashCritical,       DoFlashOfLight,        "classic_pal_heal:flash_of_light" },
     { ShouldEmergencyHolyLight,  DoHolyLight,           "classic_pal_heal:emergency_holy_light" },
     { ShouldHolyLight,           DoHolyLight,           "classic_pal_heal:holy_light" },

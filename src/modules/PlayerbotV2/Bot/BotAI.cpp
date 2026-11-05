@@ -1,6 +1,7 @@
 ﻿#include "BotAI.h"
 #include "TownLife.h"
 #include "Fleet/GateDuels.h"
+#include "Fleet/BotPool.h"   // Pool::IsScenarioBot - a test character trades with nobody
 #include "BotSnapshotView.h"
 #include "TradeRule.h"
 #include "BotTrade.h"
@@ -9,6 +10,7 @@
 #include "Group/GroupSnapshot.h"
 #include "States/StateBase.h"
 #include "States/MaintainHelpers.h"
+#include "ClassicUpkeep.h"   // Classic::IsEating / IsDrinking / RegenAuraLeftMs for the rest tracking
 #include "fmt/format.h"
 #include "GameTime.h"
 #include "SharedDefines.h"  // SPELL_FAILED_NO_AMMO
@@ -289,18 +291,20 @@ void BotAI::tick(BotSnapshotView snapshot,
     // on false→true transition; clear on true→false. Ships pass
     // through this latch too — harmless since the exit rule gates
     // on metadata kind, not raw Z.
-    // Normalise newly-summoned pets to defensive. Aggressive mode (the
+    // Normalise newly-summoned pets to passive. Aggressive mode (the
     // server default for hunter pets) makes the pet pull every mob in
     // its 25y leash radius — breaking CC, dragging adds onto the group,
-    // chasing respawns out of LoS — all things that actively hinder
-    // bot progress. Detect any pet-guid transition (Empty→guid or
-    // guid→different-guid) and fire one PetSetReactStateIntent{1}.
+    // chasing respawns out of LoS — and defensive still lets it open on
+    // whatever touches it or its owner. A bot pet only fights what the
+    // bot orders it onto (State_InCombat's pet_attack on the bot's own
+    // victim). Detect any pet-guid transition (Empty→guid or
+    // guid→different-guid) and fire one PetSetReactStateIntent{0}.
     // The intent is GCD-free so it doesn't compete with combat casts.
     {
         const ObjectGuid cur_pet = snapshot.pet_guid();
         if (!cur_pet.IsEmpty() && cur_pet != last_known_pet_guid_)
         {
-            emit.pet_set_react_state(1);   // REACT_DEFENSIVE
+            emit.pet_set_react_state(0);   // REACT_PASSIVE
         }
         last_known_pet_guid_ = cur_pet;
     }
@@ -439,6 +443,20 @@ void BotAI::tick(BotSnapshotView snapshot,
         reset_death_spiral();
 
 
+    // The group's fight (Bot/GroupFight.h), settled before the state pick: a bot whose group fights is in the combat state even before a
+    // mob has touched it, so the out-of-combat rules (Passive, Stay, follow, formation, leash, opener gates) never run mid-fight. A rogue
+    // and a cat druid without aggro of their own ran the follow / Stay rules through UBRS pulls with nothing logged (2026-10-28).
+    // Rest tracking for the rest rule and the "drinking" line, every tick whichever rule runs (the dungeon idle tail swallows
+    // idle:ooc_eat_food, so its gate is not asked there).
+    note_resting(Classic::IsEating(snapshot) || Classic::IsDrinking(snapshot), Classic::RegenAuraLeftMs(snapshot),
+                 snapshot.in_combat() || snapshot.recently_in_combat(30000), snapshot.published_at_ms());
+    if (ObjectGuid const lost = snapshot.raw().combat.chase_nopath_target; !lost.IsEmpty() &&
+        note_chase_unreachable(lost, snapshot.published_at_ms()))
+        TC_LOG_INFO("playerbot.v2", "[chase_nopath] {} has no path to {} (two in a row): another target for {} s", snapshot.name(),
+                    lost.ToString(), kChaseUnreachableMs / 1000);
+
+    update_group_fight(snapshot, group);
+
     // 1. Reactive transitions driven by snapshot (cheap, no events).
     // Routed through transition_to() so previous_state() tracks correctly.
     const bool prev_alive = (state_ != BotState::Dead && state_ != BotState::Resurrecting);
@@ -553,7 +571,7 @@ void BotAI::tick(BotSnapshotView snapshot,
     // and the bot walks away from a mob that is actively hitting it.
     // Observed 2026-05-15: "tank dies, group walks away, mobs follow
     // and kill them".
-    else if ((snapshot.in_combat() || !snapshot.raw().combat.attackers.empty() || raid_tank_on_duty) &&
+    else if ((snapshot.in_combat() || !snapshot.raw().combat.attackers.empty() || raid_tank_on_duty || group_fight()) &&
              state_ != BotState::InCombat &&
              state_ != BotState::Dead)
     {
@@ -562,7 +580,7 @@ void BotAI::tick(BotSnapshotView snapshot,
     }
     else if (state_ == BotState::InCombat &&
              !snapshot.in_combat() &&
-             snapshot.raw().combat.attackers.empty() && !raid_tank_on_duty)
+             snapshot.raw().combat.attackers.empty() && !raid_tank_on_duty && !group_fight())
     {
         // Combat just ended without dying — record a "kill" for the
         // tank-pull-pacing cooldown and increment the per-run dungeon
@@ -630,6 +648,13 @@ void BotAI::tick(BotSnapshotView snapshot,
     // Owner-led / small-party-in-a-raid-map autopilot suspension, settled before any
     // state reads dungeon_active() this tick.
     update_dungeon_autopilot_hold(snapshot, group);
+
+    // Owner's steps: the world tick walks the bot up the way its player went (chains, jumps); nothing here may move it meanwhile.
+    if (owner_steps_active(GameTime::GetGameTimeMS()))
+    {
+        set_last_rule_fired("owner_steps");
+        return;
+    }
 
     // Follow-drop: the owner dropped or jumped to a floor 4+ y below; the walk to the ledge and the flight are not interruptible.
     if (States::HonorFollowDrop(snapshot, *this, group, emit))
@@ -706,13 +731,152 @@ void BotAI::update_dungeon_autopilot_hold(BotSnapshotView s, GroupSnapshotView g
             human_lead_hold_ = lead_hold;
             TC_LOG_INFO("playerbot.v2", "[dungeon_flow] {} {} the dungeon autopilot on map {}: {}",
                 s.name(), lead_hold ? "suspends" : "resumes", s.map_id(),
-                lead_hold ? "a human leads (follows him, advances/pulls on his orders)" : "order / fight window or no human near");
+                lead_hold ? "a human leads (follows him, advances/pulls on his orders)"
+                          : !s.is_in_dungeon() ? "left the dungeon (the autopilot runs only inside one)"
+                                               : "order / fight window or no human near");
         }
     }
 
     // A fallback is anchored on its map: leaving it (zone-out, graveyard port) ends the order.
     if (fallback_active() && fallback_plan().map != s.map_id() && end_fallback())
         TC_LOG_INFO("playerbot.v2", "[owner_order] {} drops the fallback order: left the rally's map", s.name());
+}
+
+void BotAI::update_group_fight(BotSnapshotView s, GroupSnapshotView g)
+{
+    uint32 const now_ms = s.published_at_ms();
+    GroupFight::Inputs in;
+    in.raid_map = false;
+    in.battleground = s.in_battleground();
+    in.self_alive = s.is_alive();
+    in.self_in_combat = s.in_combat() || !s.raw().combat.attackers.empty();
+    GroupMemberSummary const* leader = nullptr;
+    auto const* members = g.exists() ? g.members() : nullptr;
+    bool const scenario_lead = scenario_player_lead(now_ms);
+    if (members && (s.is_led_by_player() || scenario_lead))
+    {
+        // The player the bot answers to: its owner when he is here, else the group's leader (the same pick as State_InGroup).
+        ObjectGuid lead = g.leader();
+        if (s.is_companion_with_owner())
+            for (auto const& m : *members)
+                if (m.guid == s.raw().owner_guid && m.online && m.map_id == s.map_id()) { lead = m.guid; break; }
+        for (auto const& m : *members)
+            if (m.guid == lead && m.online && m.map_id == s.map_id()) { leader = &m; break; }
+    }
+    in.led_by_human = leader && ((!leader->is_bot && leader->guid != s.guid()) || scenario_lead);
+    if (in.led_by_human)
+    {
+        in.leader_alive = leader->is_alive;
+        in.leader_in_combat = leader->in_combat;
+        for (auto const& m : *members)
+        {
+            if (!m.online || !m.is_alive || !m.in_combat || m.map_id != s.map_id() || m.guid == s.guid() || m.guid == leader->guid) continue;
+            if (std::hypot(m.x - leader->x, m.y - leader->y) <= GroupFight::kGroupFightYd) { in.member_fighting_near_leader = true; break; }
+        }
+        // Is there anything near the leader to fight? (GroupFight::kLeaderFlagOnlyMs)
+        if (in.leader_in_combat)
+        {
+            in.leader_fight_near = false;
+            auto near_leader = [&](NearbyUnit const& u)
+            {
+                if (u.hp <= 0 || !u.unit_in_combat) return false;
+                ThreatVictim const k = ThreatVictim(u.victim_kind);
+                return (k == ThreatVictim::Me || k == ThreatVictim::Tank || k == ThreatVictim::Member || k == ThreatVictim::MemberPet) &&
+                       std::hypot(u.x - leader->x, u.y - leader->y) <= GroupFight::kGroupFightYd;
+            };
+            for (NearbyUnit const& u : s.raw().combat.attackers)      if (!in.leader_fight_near && near_leader(u)) in.leader_fight_near = true;
+            for (NearbyUnit const& u : s.raw().combat.nearby_enemies) if (!in.leader_fight_near && near_leader(u)) in.leader_fight_near = true;
+        }
+        if (!in.leader_in_combat || in.leader_fight_near)
+            leader_flag_only_since_ms_ = 0;
+        else if (leader_flag_only_since_ms_ == 0)
+            leader_flag_only_since_ms_ = now_ms ? now_ms : 1u;
+        in.leader_flag_only_ms = leader_flag_only_since_ms_ ? now_ms - leader_flag_only_since_ms_ : 0;
+        // A raid map (20 and 40 players) keeps its boss tactics: the gate covers the trash between the bosses only (the owner, 2026-10-28:
+        // "make sure that in the middle of a raid the rogues or the druids aren't standing idle whilst we're trying to fight trash").
+        if (s.raid_tactics_map())
+        {
+            // A boss is up when the instance says an encounter runs, a boss fight script owns the bot, or a boss in the scan fights.
+            bool boss = s.is_encounter_in_progress() || s.raw().raid_order.script_owns;
+            for (NearbyUnit const& u : s.raw().combat.nearby_enemies)
+                if (!boss && u.hp > 0 && u.unit_in_combat && (u.is_dungeon_boss || u.is_boss_rank)) boss = true;
+            in.raid_map = boss;
+        }
+    }
+    bool const fighting = in.led_by_human && GroupFight::GroupFighting(in);
+    if (!fighting)
+        group_fight_since_ms_ = 0;
+    else if (group_fight_since_ms_ == 0)
+        group_fight_since_ms_ = now_ms ? now_ms : 1u;
+    in.fight_age_ms = group_fight_since_ms_ ? now_ms - group_fight_since_ms_ : 0;
+
+    uint32 const order_age = now_ms - last_owner_command_ms();
+    // A mob on this bot or on a member who is not the tank: the pull has come loose and the group fights it (rule 1), so the hold for
+    // the tank's pull back no longer applies (wc_cobrahn_led 0.1.27 set B: the hunter and mage stayed held 8 s while a Deviate Viper
+    // and Adder killed the priest next to the return point).
+    bool loose_on_group = false;
+    {
+        auto loose = [&](NearbyUnit const& u)
+        {
+            if (u.hp <= 0 || !u.unit_in_combat) return false;
+            ThreatVictim const k = ThreatVictim(u.victim_kind);
+            float bx, by, bz; s.position(bx, by, bz);
+            return (k == ThreatVictim::Me || k == ThreatVictim::Member || k == ThreatVictim::MemberPet) &&
+                   std::hypot(u.x - bx, u.y - by) <= GroupFight::kGroupFightYd;
+        };
+        for (NearbyUnit const& u : s.raw().combat.attackers)      if (!loose_on_group && loose(u)) loose_on_group = true;
+        for (NearbyUnit const& u : s.raw().combat.nearby_enemies) if (!loose_on_group && loose(u)) loose_on_group = true;
+    }
+    // The full Passive (the panel's Passive): the group's fight does not pull the bot in, as a fresh Stop would not.
+    if (owner_no_fight())
+        in.order = GroupFight::Order::Stop;
+    else if (fleeing(now_ms))
+        in.order = GroupFight::Order::Flee;
+    else if (fallback_active())
+        in.order = GroupFight::Order::Fallback;
+    else if (pull_back_active())
+        in.order = GroupFight::Order::PullBack;
+    // The rest of the group holds while the tank brings the mob back, until the leader's Attack or a later order; a healer still heals
+    // (rule 2) and a tank still takes the mobs (rule 5: a raid's Pull hands the fight back to the tanks without an icon too).
+    else if (!loose_on_group &&
+             GroupFight::PullWaitPending(owner_pull_ms(), owner_attack_ms(),
+                                         is_manual_mode(now_ms) || owner_follow_order() ? last_owner_command_ms() : 0u, now_ms) &&
+             effective_role(s) != Role::Healer && effective_role(s) != Role::Tank)
+        in.order = GroupFight::Order::PullBack;
+    else if (is_manual_mode(now_ms))
+    {
+        switch (owner_command())
+        {
+            case OwnerCommand::Disengage: in.order = GroupFight::Order::Stop; break;
+            case OwnerCommand::Stay:
+            case OwnerCommand::Hold:      in.order = GroupFight::Order::Stay; break;
+            case OwnerCommand::Follow:    in.order = GroupFight::Order::Follow; break;
+            default: break;
+        }
+    }
+    else if (owner_follow_order())
+        in.order = GroupFight::Order::Follow;
+    in.order_age_ms = (owner_no_fight() || in.order == GroupFight::Order::Flee || in.order == GroupFight::Order::Fallback ||
+                       (in.order == GroupFight::Order::PullBack && pull_back_active())) ? 0u
+                    : in.order == GroupFight::Order::PullBack ? now_ms - owner_pull_ms() : order_age;
+
+    GroupFight::Mode const mode = GroupFight::Decide(in);
+    if (mode == GroupFight::Mode::Fight && group_fight_mode_ != GroupFight::Mode::Fight && holding_position(now_ms) && !use_stay())
+    {
+        float x, y, z, rx, ry, rz;
+        uint32 rmap;
+        s.position(x, y, z);
+        if (!stay_return(rx, ry, rz, rmap))
+            set_stay_return(x, y, z, s.map_id());
+    }
+    if (mode != group_fight_mode())
+    {
+        TC_LOG_INFO("playerbot.v2", "[group_fight] {} {} -> {}: leader_in_combat {} member_fighting {} raid_boss {} order {} ({} ms old)",
+            s.name(), GroupFight::ModeName(group_fight_mode()), GroupFight::ModeName(mode), int(in.leader_in_combat),
+            int(in.member_fighting_near_leader), int(in.raid_map), int(in.order), in.order == GroupFight::Order::None ? 0u : in.order_age_ms);
+        group_fight_mode_.store(mode, std::memory_order_relaxed);
+        set_group_idle_since_ms(0);
+    }
 }
 
 void BotAI::dispatch_primary(BotSnapshotView s, GroupSnapshotView g,
@@ -818,7 +982,12 @@ void BotAI::dispatch_layers(BotSnapshotView s, GroupSnapshotView g,
     // Trades opened on the bot are likewise declined automatically. Window
     // stays open server-side until either side cancels — without this the
     // bot would sit there with the dialog up indefinitely.
-    if (s.has_trade_request() &&
+    if (s.has_trade_request() && ::Playerbot::Pool::IsScenarioBot(s.bot_id()))
+    {
+        // A scenario test character (the scorecard raids in Tier 3 test gear) never buys, sells or takes a gift: cancelled at once.
+        em.trade_decline();
+    }
+    else if (s.has_trade_request() &&
         AcceptsTradeFrom(Services::Config().behavior_accept_owner_trade(), s.trade_partner_is_real(),
                          !s.raw().owner_guid.IsEmpty() && s.raw().social_events.trade_partner_guid == s.raw().owner_guid,
                          s.raw().social_events.trade_partner_in_my_group))

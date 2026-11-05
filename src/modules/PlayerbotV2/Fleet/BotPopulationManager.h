@@ -194,6 +194,9 @@ public:
     // each RunGearBackfill pass teaches it its new ranks, class-quest abilities and talents, and mends its gear. Runs
     // for every companion, whatever its gear. Cheap; no-op for any other bot.
     void CompanionUpkeep(BotId id, Player* p);
+    // Hired bots only: a Group Finder loan bot out of its owner's group is deleted (HireMgr::SetLoaned).
+    bool ReleaseLoan(BotId id, Player* p, uint32 now_ms);
+    void ReleaseOfflineLoans(uint32 now_ms);
     // A hunter companion's starter pet, granted once per bot (OwnerRegistry::StarterPetGranted).
     void GrantCompanionStarterPet(BotId id, Player* p);
     // A bot hunter of level 10+ nobody owns (world, pool and scenario bots) that has no pet, summoned, dismissed or stabled, gets a beast of its own:
@@ -304,6 +307,12 @@ public:
     // One-line world spawner status (`.bot world`).
     std::string WorldReport() const;
     WorldLoadFacts WorldLoad() const;
+    // The world bot choice of the ForeverBots panel (GM only; Fleet/BotSize.h PopLevel as an int: 0 Off, 1 Low, 2 Medium, 3 High;
+    // -1 = the config files decide). Applies on the next world tick and is kept over a restart.
+    void SetWorldPopulation(int level);
+    int WorldPopulation() const;
+    std::string WorldPopulationLine() const;
+    bool WorldPopulationDraining() const;
     // True for a bot the world spawner placed: BG / LFG queue fills leave these where they are.
     bool IsWorldPlaced(BotId id) const;
     bool WorldSpawnerPending(uint64 guid_low) const;
@@ -409,6 +418,7 @@ private:
         uint16 bg_type = 0;
         uint32 started_ms = 0, deadline_ms = 0, last_log_ms = 0, last_poll_ms = 0, first_in_bg_ms = 0, peak_in_bg = 0;
         uint8 last_status = 0;
+        bool end_logged = false;       // the "[bgsoak] match over" line was written
         std::string result;            // the final line once Done
     } bg_soak_;
     struct BgStress { uint16 bg_type = 0; uint32 cycles_left = 0, cycle = 0, hold_ms = 60000, phase_end_ms = 0;

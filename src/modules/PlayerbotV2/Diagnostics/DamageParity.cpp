@@ -5,6 +5,7 @@
 #include "../Api/ClassicSupplies.h"
 #include "../Bot/BotSnapshotView.h"
 #include "../Bot/ClassicUpkeep.h"
+#include "../Bot/ThreatLimits.h"
 #include "../Group/GroupSnapshot.h"
 #include "../Bot/BotAI.h"
 #include "../Bot/BotRegistry.h"
@@ -1004,30 +1005,40 @@ void ClearBagGear(Player* p, std::uint32_t kFreeWanted = 8)
 // `consumables` false: no flask, elixir or Juju, the bot's own kit (idle:always_buff) is what it fights with. The support scorecard (233) re-applied Supreme
 // Power to the resto shaman and the Mongoose to the holy paladin and the tank every 15 s, each taking off the flask of the bot's own kit, which the bot then
 // put back: the readiness audit found "no flask or elixir of the kit" on whichever had lost the last swap.
+// A raid buff already on the bot is renewed when it has less than this left, not only put on once it is gone: an aura carried over from
+// the scenario before (or a shout cast two minutes earlier) was kept as it was and ran out in the first seconds of the measurement
+// (244 paladin run 1: Battle Shout missing on the fury, the rogue, the mage and the warlock at the start, 19:39:14). The window
+// renews the buffs every 15 s, so 30 s leaves no gap.
+constexpr int32 kRaidBuffRenewMs = 30000;
+
 void SetRaidBuffs(Player* p, bool on, bool group = false, bool consumables = true)
 {
     SetWizardOil(p, on);
     SetCasterKit(p, on);
+    auto keep = [p](std::uint32_t id)
+    {
+        if (Aura* a = p->GetAura(id))
+        {
+            if (!a->IsPermanent() && a->GetDuration() < kRaidBuffRenewMs)
+                a->RefreshDuration();
+        }
+        else
+            p->AddAura(id, p);
+    };
     if (IsCasterBot(p))
         for (std::uint32_t const id : kCasterBuffSpells)
         {
             if (on && !consumables && id == kSupremePowerSpell)
                 continue;
             if (on)
-            {
-                if (!p->HasAura(id))
-                    p->AddAura(id, p);
-            }
+                keep(id);
             else
                 p->RemoveAurasDueToSpell(id);
         }
     for (std::uint32_t const id : kRaidBuffSpells)
     {
         if (on)
-        {
-            if (!p->HasAura(id))
-                p->AddAura(id, p);
-        }
+            keep(id);
         else
             p->RemoveAurasDueToSpell(id);
     }
@@ -1039,9 +1050,16 @@ void SetRaidBuffs(Player* p, bool on, bool group = false, bool consumables = tru
             TC_LOG_INFO("playerbot.v2", "[dmg_parity] raid buff {} not found in the spell data, leg runs without it", what);
             return;
         }
+        // Renewed like the list above, not only put on once gone: 246 warrior run 2 began with Kings missing on four raiders, a Kings carried
+        // over from a session before (214 s left at the login) still on at the run reset and gone 5 s later at the readiness audit.
         if (!on)
             p->RemoveAurasDueToSpell(id);
-        else if (!p->HasAura(id) && !p->AddAura(id, p))
+        else if (Aura* a = p->GetAura(id))
+        {
+            if (!a->IsPermanent() && a->GetDuration() < kRaidBuffRenewMs)
+                a->RefreshDuration();
+        }
+        else if (!p->AddAura(id, p))
             TC_LOG_ERROR("playerbot.v2", "[dmg_parity] raid buff {} ({}) could not be applied", id, what);
     };
     set(kKingsSpell, "Blessing of Kings");
@@ -1095,6 +1113,19 @@ void Engage(Player* p, Creature* d)
         return;
     ::Playerbot::API api(p);
     api.start_attack(d->GetGUID());
+    if (BotAI* ai = ::Playerbot::Services::Registry().ai(p->GetGUID().GetCounter()))
+    {
+        ai->enter_manual(BotAI::OwnerCommand::Engage, d->GetGUID(), GameTime::GetGameTimeMS());
+        ai->release_owner_lead();
+    }
+}
+
+// The owner's Attack order alone, as a player gives it: the bot opens by its own rules, when its threat hold lets it. Engage's start_attack
+// swung at once whatever the hold said, and repeated every second against a bot whose hold had stopped its swing it took the swing back up
+// (241 support scorecard: the fury opened 2 s before the paladin tank, 2556 threat against 508, kept the boss for 107-120 of 120 s and was
+// at 103-108 % of the tank while "held").
+void EngageOrder(Player* p, Creature* d)
+{
     if (BotAI* ai = ::Playerbot::Services::Registry().ai(p->GetGUID().GetCounter()))
     {
         ai->enter_manual(BotAI::OwnerCommand::Engage, d->GetGUID(), GameTime::GetGameTimeMS());
@@ -2796,13 +2827,19 @@ struct GroupSub
     // The readiness audit: what is wrong with the bot, by category (empty = nothing), and the seconds a ranged bot spent in melee reach / a melee bot out of it.
     std::string gap_ranks, gap_talents, gap_gear, gap_consumables, gap_rotation, gap_position;
     std::uint32_t ranged_close_s = 0, melee_far_s = 0;
+    float closest = -1.0f;   // the nearest the bot stood to the dummy in the measured seconds (edge to edge, as a spell's range is checked), -1 = no sample
     std::uint32_t rage_samples = 0, rage_sum = 0, rage_ge30_s = 0, rage_ge50_s = 0, rage_cap_s = 0;   // rage users only, one sample a measured second
     std::uint32_t trace_s = 0;          // seconds left of the per-second trace after a hunter's placement
     std::uint8_t role = 0;              // 0 dps, 1 healer, 2 tank
     bool has_mana = false;              // support scorecard: the mana the bot started with and held lowest, percent, and the seconds under 5 %
     std::uint32_t mana_start = 0, mana_min = 100, mana_end = 0, oom_s = 0;
     float threat_start = 0.f, threat_end = 0.f;   // support scorecard: its threat on the boss when the measurement began and now
+    float peak_threat_pct = 0.f;        // support scorecard, a dps: its highest threat on the boss in percent of the tank's, one sample a measured second
+    std::uint32_t pull_threat_s = 0;    // and the seconds it held enough to take the boss from the tank (kAggroSwitchRatio*)
     std::uint32_t last_replace_s = 0;   // measure second of the last placement: a bot is put back at most every 10 s, or at once when it is 40 y away
+    Position last_spot;                 // the ring point of the last placement (has_last_spot), and the ring points the bot stood on without seeing the dummy
+    bool has_last_spot = false;
+    std::vector<Position> blind_spots;
 };
 
 enum class GroupPhase : std::uint8_t { Place, Buff, Warm, Measure };
@@ -2839,6 +2876,7 @@ GroupRun gr;
 
 constexpr float kGroupMeleeRadius = 4.0f;
 constexpr float kGroupRangedRadius = 24.0f;
+constexpr float kSupportRangedArc = 1.5707963f;   // a quarter of the ring: a 34 y chord at 24 y, inside a heal's 40 y (GroupPlaceOne)
 
 void ZeroResistances(Creature* d)
 {
@@ -2895,6 +2933,20 @@ void StockGroupKit(Player* p)
     TC_LOG_INFO("playerbot.v2", "[dmg_group] {} kit: {} items stocked", p->GetName(), stocked);
 }
 
+// The bot's own always-on kit (Playerbot.AlwaysBuffs) renewed, with the set and kinds its idle:always_buff rule gives it. The runs of a scorecard follow
+// each other in combat, so that idle rule does not run between them, and an hour-long elixir that ran out in one run stayed off for the rest (245 support
+// druid runs 2-3: the fury's Mongoose, put on at 12:52 and carried since, ran out in run 1; "no flask or elixir of the kit active" in runs 2 and 3).
+void RenewOwnKit(Player* p)
+{
+    auto const snap = ::Playerbot::Services::Snapshots().latest(p->GetGUID().GetCounter());
+    auto const gsnap = ::Playerbot::Services::Snapshots().latest_group(p->GetGUID().GetCounter());
+    if (!snap || !gsnap)
+        return;
+    BotSnapshotView const s(*snap);
+    GroupSnapshotView const g(*gsnap);
+    ::Playerbot::API(p).always_buffs(uint8(AlwaysBuffSetOf(s, g)), AlwaysMask(s, g));
+}
+
 // A flat, open site for the dummy: the staging spot is wherever the first bot stood (Stormwind, (-8948,494,80): a ledge, 46 ring points off its level and
 // 50 without line of sight), so every scorecard fought on a different patch of ground. Round the bot, centres 0 to 160 y out in 20 y steps and 16 bearings,
 // each scored by the ring points (16 each at 10, 16 and 24 y) with ground within 2.5 of the centre (the rule GroupFindSpot uses) and a line of sight to it.
@@ -2949,7 +3001,12 @@ done:
 // A place on the ring round the dummy that stands on its level and sees it: the ring is walked from the slot's angle outwards in 7.5 degree steps (219: with 15 degrees six raiders, Survival among them, found no point where the dummy stood in a hollow, and the next slot's lattice did) and, if
 // nothing on it sees the dummy, at shorter radii (a hunter keeps 13 y, its Auto Shot needs 11). The first scorecard in Stormwind put casters and hunters
 // on ring points behind walls: no line of sight, no cast, and a teleport back onto the same point every second.
-bool GroupFindSpot(Creature* d, bool melee, float angle0, Position& out, float* radius_out = nullptr)
+// A point within 4 y of one of `avoid` is skipped: the bot was put there and did not see the dummy (243: the elemental, put back 9 times onto
+// (-8941.0,555.7,77.1), whose height is 2 y above the dummy's floor and whose check from 2 y above that saw over what stood in the way; the bot
+// stood at 75.1, 4 y off it, with no line of sight, cast nothing for the 3 runs and scored 0).
+// `see`: places the point must have a line of sight to as well (the support scorecard's healers).
+bool GroupFindSpot(Creature* d, bool melee, float angle0, Position& out, float* radius_out = nullptr, std::vector<Position> const* avoid = nullptr,
+                   std::vector<Position> const* see = nullptr)
 {
     Map* map = d->GetMap();
     if (!map)
@@ -2966,6 +3023,8 @@ bool GroupFindSpot(Creature* d, bool melee, float angle0, Position& out, float* 
         {
             float const angle = angle0 + float((k + 1) / 2) * 0.1309f * (k % 2 ? 1.0f : -1.0f);
             float const x = dx + std::cos(angle) * radius, y = dy + std::sin(angle) * radius;
+            if (avoid && std::any_of(avoid->begin(), avoid->end(), [&](Position const& a) { return a.GetExactDist2dSq(x, y) < 4.0f * 4.0f; }))
+                continue;
             float const z = map->GetHeight(ps, x, y, dz + 2.0f, true, 6.0f);
             if (z <= INVALID_HEIGHT + 1.0f)
             {
@@ -2982,6 +3041,12 @@ bool GroupFindSpot(Creature* d, bool melee, float angle0, Position& out, float* 
                 ++no_sight;
                 continue;
             }
+            if (see && std::any_of(see->begin(), see->end(), [&](Position const& h) {
+                    return !map->isInLineOfSight(ps, x, y, z + 2.0f, h.GetPositionX(), h.GetPositionY(), h.GetPositionZ() + 2.0f, LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing); }))
+            {
+                ++no_sight;
+                continue;
+            }
             out = Position(x, y, z, Position::NormalizeOrientation(std::atan2(dy - y, dx - x)));
             if (radius_out)
                 *radius_out = radius;
@@ -2992,7 +3057,7 @@ bool GroupFindSpot(Creature* d, bool melee, float angle0, Position& out, float* 
     return false;
 }
 
-void GroupPlaceOne(Player* p, Creature* d, GroupSub const& s, std::size_t slot, std::size_t slots, bool log_target = false)
+void GroupPlaceOne(Player* p, Creature* d, GroupSub& s, std::size_t slot, std::size_t slots, bool log_target = false)
 {
     float angle = 6.2831853f * float(slot) / float(std::max<std::size_t>(slots, 1));
     if (s.melee)
@@ -3009,9 +3074,42 @@ void GroupPlaceOne(Player* p, Creature* d, GroupSub const& s, std::size_t slot, 
             angle = o + 3.1415927f + (float(slot) - float(slots - 1) / 2.0f) * step;
         }
     }
+    else if (gr.support && slots > 1)
+    {
+        // The support scorecard's healers must reach every raider: spread round the whole 24 y ring, raiders on opposite sides stood 48 y
+        // apart, past the 40 y of a heal (244 druid run 3: the healers on the ring's north side, the fire mage 46-48 y and the warlock
+        // 50 y from all five; neither got a heal and both died, 2 died in 243's druid run 3 as well). The ranged stand on a quarter of the
+        // ring, at most 34 y apart, on the tank's side: the bots' own raid formation (combat:raid_formation, "stops 22y short of tank") takes
+        // them there. Behind the dummy with the protection warrior in front, every healer walked to its formation spot through the dummy and was
+        // put back (245 warrior runs: 30 put-backs against 2 in the paladin and druid runs, where the tank stands behind it with the melee;
+        // the shaman flagged "ranged bot in melee reach 5 s" in run 2).
+        bool const tank_in_front = gr.tank < gr.subs.size() && gr.subs[gr.tank].spec == 73;
+        float const step = kSupportRangedArc / float(slots - 1);
+        angle = d->GetOrientation() + (tank_in_front ? 0.0f : 3.1415927f) + (float(slot) - float(slots - 1) / 2.0f) * step;
+    }
+    // A ranged raider takes no other ranged raider's place (4 y) and, in the support scorecard, stands where it sees every healer already placed.
+    // 246 paladin runs 1-2: the fire mage and the warlock were put on one point that saw the dummy but no healer; neither was picked for a heal
+    // until 10 % (the triage leaves a member out of sight above 35 %), then five healers cast at it for 12 s and none landed. Both died in both
+    // runs (48 and 84 s, 6 and 54 s dead).
+    std::vector<Position> avoid = s.blind_spots, healers;
+    if (!s.melee)
+        for (GroupSub const& o : gr.subs)
+            if (&o != &s && o.has_last_spot && !o.melee)
+            {
+                avoid.push_back(o.last_spot);
+                if (gr.support && o.role == 1)
+                    healers.push_back(o.last_spot);
+            }
     Position pos;
     float radius = 0.0f;
-    bool const found = GroupFindSpot(d, s.melee, angle, pos, &radius);
+    bool found = GroupFindSpot(d, s.melee, angle, pos, &radius, &avoid, healers.empty() ? nullptr : &healers);
+    if (!found && !healers.empty())
+    {
+        TC_LOG_INFO("playerbot.v2", "[dmg_group] {}: no ring point sees the dummy and all {} healers, placed by the dummy alone", s.name, healers.size());
+        found = GroupFindSpot(d, s.melee, angle, pos, &radius, &avoid);
+    }
+    s.last_spot = pos;
+    s.has_last_spot = found;
     if (log_target)
         TC_LOG_INFO("playerbot.v2", "[dmg_group] {} put back to ({:.1f},{:.1f},{:.1f}) {} radius {:.0f} from the bot's ({:.1f},{:.1f},{:.1f}), dummy at ({:.1f},{:.1f},{:.1f}) ground under it {:.1f}", s.name,
                     pos.GetPositionX(), pos.GetPositionY(), pos.GetPositionZ(), found ? "on the ring" : "(no ring point: melee fallback below)", radius, p->GetPositionX(), p->GetPositionY(), p->GetPositionZ(),
@@ -3038,8 +3136,11 @@ void GroupPlaceOne(Player* p, Creature* d, GroupSub const& s, std::size_t slot, 
 void GroupPlaceAll(Creature* d)
 {
     std::size_t melee_slot = 0, ranged_slot = 0, melee_n = 0, ranged_n = 0;
-    for (GroupSub const& s : gr.subs)
+    for (GroupSub& s : gr.subs)
+    {
         (s.melee ? melee_n : ranged_n)++;
+        s.has_last_spot = false;   // everyone is placed anew: the places of the run before are not kept clear or looked at (GroupPlaceOne)
+    }
     for (GroupSub& s : gr.subs)
         if (Player* p = ObjectAccessor::FindConnectedPlayer(s.guid); p && p->IsInWorld())
         {
@@ -3372,16 +3473,20 @@ constexpr KeySpells kKeySpells[] = {
     { 103, "Claw,Rip,Ferocious Bite" },
     // The healers and the tanks (support scorecard).
     { 256, "Power Word: Shield,Greater Heal|Flash Heal" },
-    { 257, "Greater Heal,Flash Heal,Renew" },
+    { 257, "Greater Heal|Flash Heal,Renew" },
     { 65,  "Flash of Light|Holy Light" },
-    { 105, "Healing Touch,Rejuvenation,Regrowth" },
+    { 105, "Healing Touch,Rejuvenation|Regrowth" },
     // A healer's emergency heal (Flash Heal, Holy Light, Lesser Healing Wave) is cast only when someone is low: with the raid healing by raid rules
     // the support scorecard (236) kept everyone up on the efficient heals, overheal 5-48 %, and the readiness audit failed the healers for the heal
-    // the fight never called for. One of them is enough.
-    { 264, "Healing Wave|Lesser Healing Wave,Chain Heal" },
+    // the fight never called for. One of them is enough. The same for the holy priest's Flash Heal (238: 4 of 9 runs without one, the
+    // raid kept up on Greater Heal, Renew and Prayer of Healing at 40-58 % mana) and the resto druid's two heals over time (Rejuvenation
+    // or Regrowth, whichever its patients called for: 238 had runs with only one of them, the raid healed at 15-46 % overheal).
+    // The resto shaman's Chain Heal waits for 3 raiders under the medium threshold within 12.5 y of each other (ChainHealTarget): 240 had 3 of 9
+    // runs without one, the raid kept up on Healing Wave, two of them with Lesser Healing Wave for the low ones.
+    { 264, "Healing Wave,Chain Heal|Lesser Healing Wave" },
     { 73,  "Shield Slam,Sunder Armor,Revenge" },
     { 66,  "Holy Shield,Consecration" },
-    { 104, "Maul,Swipe,Demoralizing Roar" },
+    { 104, "Maul,Demoralizing Roar" },   // Swipe is the bear's pack threat (2+ mobs in reach); on the one boss Maul is the rage dump
 };
 
 // The stance or form a spec plays in (checked after the fight, while the bot stands).
@@ -3405,10 +3510,10 @@ void AuditRotation(Player* p, GroupSub const& s, std::map<std::uint32_t, std::ui
             std::uint32_t& c = by_name[LowerName(SpellNameOf(key))];
             c += a.Attempts();
         }
-    std::set<std::string> known;
+    std::map<std::string, std::uint32_t> known;   // lower-cased spell name -> a known spell of that name
     for (auto const& [id, ps] : p->GetSpellMap())
         if (ps.state != PLAYERSPELL_REMOVED)
-            known.insert(LowerName(SpellNameOf(id)));
+            known.emplace(LowerName(SpellNameOf(id)), id);
     for (KeySpells const& k : kKeySpells)
     {
         if (k.spec != s.spec)
@@ -3422,17 +3527,28 @@ void AuditRotation(Player* p, GroupSub const& s, std::map<std::uint32_t, std::ui
             std::string shown = entry;
             std::uint32_t used = 0;
             bool is_known = false;
+            float reach = 0.0f;   // the longest range among the known alternatives (0 = none has a range)
             for (std::size_t a = 0; a <= entry.size();)
             {
                 std::size_t const bar = std::min(entry.find('|', a), entry.size());
                 std::string const alt = LowerName(entry.substr(a, bar - a));
                 a = bar + 1;
-                is_known = is_known || known.count(alt);
+                if (auto kn = known.find(alt); kn != known.end())
+                {
+                    is_known = true;
+                    if (SpellInfo const* info = sSpellMgr->GetSpellInfo(kn->second, DIFFICULTY_NONE))
+                        reach = std::max(reach, info->GetMaxRange(false, p));
+                }
                 if (auto it = by_name.find(alt); it != by_name.end())
                     used += it->second;
             }
+            // A spell whose range the bot never stood in had no chance to be cast: support 239 put the fire mage on its 24 y ring, out of Fire
+            // Blast's 20 y, and the audit failed it for 4 of 9 runs for the Fire Blast that runs at 15-21 y cast.
             if (!is_known)
                 gaps.push_back(fmt::format("{} not known", shown));
+            else if (!used && reach > 0.0f && s.closest > reach)
+                TC_LOG_INFO("playerbot.v2", "[readiness] {} {} cast 0 times: the bot stood {:.1f} y or more from the dummy, its range is {:.1f} y (not a gap)",
+                            s.label, shown, s.closest, reach);
             else if (!used)
                 gaps.push_back(fmt::format("{} cast 0 times", shown));
         }
@@ -3478,6 +3594,7 @@ void GroupStartMeasuring(Creature* d)
         s.casting_s = s.attacking_s = s.idle_s = s.dead_s = s.mana_refills = s.replaced = 0;
         s.rage_samples = s.rage_sum = s.rage_ge30_s = s.rage_ge50_s = s.rage_cap_s = 0;
         s.ranged_close_s = s.melee_far_s = s.last_replace_s = 0;
+        s.closest = -1.0f;
         s.oom_s = 0;
         s.mana_min = 100;
         if (Player* p = ObjectAccessor::FindConnectedPlayer(s.guid))
@@ -3485,6 +3602,8 @@ void GroupStartMeasuring(Creature* d)
             s.has_mana = p->GetPowerType() == POWER_MANA && p->GetMaxPower(POWER_MANA) > 0;
             s.mana_start = s.mana_end = s.has_mana ? std::uint32_t(100u * p->GetPower(POWER_MANA) / p->GetMaxPower(POWER_MANA)) : 0u;
             s.threat_start = s.threat_end = d ? d->GetThreatManager().GetThreat(p) : 0.f;
+            s.peak_threat_pct = 0.f;
+            s.pull_threat_s = 0;
             BuffSummary(p, s.buff_count, s.buffs);
             AuditReadiness(s, p);
         }
@@ -3853,6 +3972,22 @@ void SupportBossOnTank(Creature* d)
     d->GetMotionMaster()->MoveChase(tank);
 }
 
+// Each run's boss starts on the tank. Armed aggressive (ArmMob), or with the raid's combat stopped between runs, it takes the nearest
+// raider on its next update before SupportBossOnTank sees it free: in all three paladin runs of 237 it opened on a member (the warlock in
+// run 2), the dps kept hitting a boss on a member, and the paladin tank, with no taunt, never had it (0 of 120 s).
+// The raid's damage over time from the run before goes too: it kept ticking into the cleared threat list with the tank at no threat, and
+// the boss turned on its caster within a second (243 paladin run 3: Sptaff at 925 threat against the tank's 116 one second in; run 2 the
+// fire mage at 686 against 58). The fury then opened on a boss loose on a member and held it, and the paladin, with no taunt, had it 0 of
+// 120 s in runs 2 and 3 of both 242 and 243. Run 1 starts on a dummy with nothing on it; now every run does.
+void SupportBossStartOnTank(Creature* d)
+{
+    ObjectGuid const self = d->GetGUID();
+    d->RemoveAppliedAuras([self](AuraApplication const* a) { return a->GetBase()->GetCasterGUID() != self; });
+    d->AttackStop();
+    d->GetThreatManager().ResetAllThreat();
+    SupportBossOnTank(d);
+}
+
 // Once per measured second: who the boss is hitting, how low the raid is, each bot's threat, and the raid pulse.
 void SupportSecond(Creature* d)
 {
@@ -3876,6 +4011,22 @@ void SupportSecond(Creature* d)
             targets.push_back(p);
     }
     gr.danger_s += danger;
+    // A dps over the tank's threat takes the boss only past the core's switch ratio, 110 % in melee reach and 130 % at range: a fury held at the
+    // tank's threat (237: 65437 against 64758 at the end of run 1, the boss on the tank) gains threat a little faster than the tank over the
+    // window and is not a threat to its aggro.
+    if (tank && tank->IsAlive() && gr.subs[gr.tank].threat_end > 0.f)
+    {
+        float const tank_threat = gr.subs[gr.tank].threat_end;
+        for (GroupSub& s : gr.subs)
+        {
+            Player* p = s.role == 0 ? ObjectAccessor::FindConnectedPlayer(s.guid) : nullptr;
+            if (!p || !p->IsInWorld() || !p->IsAlive())
+                continue;
+            s.peak_threat_pct = std::max(s.peak_threat_pct, 100.f * s.threat_end / tank_threat);
+            if (s.threat_end >= tank_threat * (d->IsWithinMeleeRange(p) ? kAggroSwitchRatioMelee : kAggroSwitchRatioRanged))
+                ++s.pull_threat_s;
+        }
+    }
     if (gr.pulse_s && gr.measure_s % gr.pulse_s == 0)
         for (std::uint32_t n = 0; n < gr.pulse_n && !targets.empty(); ++n)
             Unit::DealDamage(d, targets[(gr.pulse_i++) % targets.size()], std::uint32_t(gr.pulse_dmg), nullptr, SPELL_DIRECT_DAMAGE, SPELL_SCHOOL_MASK_FIRE, nullptr, false);
@@ -3924,15 +4075,13 @@ void ReportSupport(Creature* d)
                        "avoid_pct", "swings", "dodge", "parry", "block", "miss", "crit", "crush", "avg_ilvl", "t3_pieces", "readiness", "gaps_ranks", "gaps_talents", "gaps_gear", "gaps_consumables", "gaps_rotation",
                        "gaps_position", "gaps_role", "buff_count", "buffs", "heal_spells" }));
 
-    double top_dps_tps = 0.0, tank_tps = 0.0;
+    // The dps that came closest to taking the boss: the seconds it held the switch ratio's threat, then its peak share of the tank's.
+    GroupSub const* top_puller = nullptr;
     for (std::size_t i = 0; i < gr.subs.size(); ++i)
-    {
-        double const tps = double(gr.subs[i].threat_end - gr.subs[i].threat_start) / secs;
-        if (i == gr.tank)
-            tank_tps = tps;
-        else if (gr.subs[i].role == 0)
-            top_dps_tps = std::max(top_dps_tps, tps);
-    }
+        if (GroupSub const& o = gr.subs[i]; i != gr.tank && o.role == 0 &&
+            (!top_puller || o.pull_threat_s > top_puller->pull_threat_s ||
+             (o.pull_threat_s == top_puller->pull_threat_s && o.peak_threat_pct > top_puller->peak_threat_pct)))
+            top_puller = &o;
 
     std::uint64_t raid_eff = 0, raid_raw = 0, raid_taken = 0, raid_swings = 0, raid_avoided = 0;
     std::size_t failing = 0, deaths = 0;
@@ -4010,8 +4159,9 @@ void ReportSupport(Creature* d)
                 role_gaps.push_back(fmt::format("the tank was dead {} s", s.dead_s));
             if (gr.boss_on_tank_s * 100u < gr.measure_s * 95u)
                 role_gaps.push_back(fmt::format("the boss was on the tank {} of {} s", gr.boss_on_tank_s, gr.measure_s));
-            if (top_dps_tps > tank_tps)
-                role_gaps.push_back(fmt::format("a dps out-threatened the tank ({:.0f} against {:.0f} a second)", top_dps_tps, tank_tps));
+            if (top_puller && top_puller->pull_threat_s)
+                role_gaps.push_back(fmt::format("{} held the threat to take the boss for {} s (peak {:.0f}% of the tank's)", top_puller->label, top_puller->pull_threat_s,
+                                                top_puller->peak_threat_pct));
         }
         if (s.dead_s)
         {
@@ -4138,13 +4288,22 @@ bool GroupStep(std::string& failure)
                 gr.phase = GroupPhase::Warm;
                 gr.t = 0;
                 if (gr.support)
+                {
                     ArmMob(d, gr.swing);
+                    SupportBossStartOnTank(d);
+                }
             }
             return false;
         case GroupPhase::Warm:
-            for (GroupSub const& s : gr.subs)
-                if (Player* p = ObjectAccessor::FindConnectedPlayer(s.guid); p && p->IsAlive() && !(gr.support && s.role == 1))
-                    Engage(p, d);
+            // The support scorecard measures threat discipline: its tank opens, the rest get the owner's Attack order (EngageOrder).
+            for (std::size_t i = 0; i < gr.subs.size(); ++i)
+                if (Player* p = ObjectAccessor::FindConnectedPlayer(gr.subs[i].guid); p && p->IsAlive() && !(gr.support && gr.subs[i].role == 1))
+                {
+                    if (gr.support && i != gr.tank)
+                        EngageOrder(p, d);
+                    else
+                        Engage(p, d);
+                }
             if (gr.support)
                 SupportBossOnTank(d);
             if (gr.t >= 5)
@@ -4179,6 +4338,15 @@ bool GroupStep(std::string& failure)
                 if (o.melee == s.melee)
                     ++slot;
             }
+            // A bot that stands near the ring point it was put on and does not see the dummy from there: that point is not used for it again (243:
+            // the elemental put back onto the same blind point every 10 s for 3 runs). The check from the point sees over what stands in the way.
+            if (s.has_last_spot && !d->IsWithinLOSInMap(p) && p->GetExactDist2d(s.last_spot) <= 6.0f)
+            {
+                s.blind_spots.push_back(s.last_spot);
+                s.has_last_spot = false;
+                TC_LOG_INFO("playerbot.v2", "[dmg_group] {} sees no dummy from its ring point ({:.1f},{:.1f},{:.1f}) (stands at ({:.1f},{:.1f},{:.1f})): the point is not used for it again ({} so far)",
+                            s.name, s.last_spot.GetPositionX(), s.last_spot.GetPositionY(), s.last_spot.GetPositionZ(), p->GetPositionX(), p->GetPositionY(), p->GetPositionZ(), s.blind_spots.size());
+            }
             if (s.replaced < 3 && !s.melee)
             {
                 // Why a ranged bot stood in melee reach: what moved it and what its engage saw (first three times per bot).
@@ -4208,7 +4376,12 @@ bool GroupStep(std::string& failure)
                         tai ? int(tai->owner_command()) : -1);
         }
         if (p->GetVictim() != d && !p->HasUnitState(UNIT_STATE_CASTING) && !(gr.support && s.role == 1))   // a healer heals, it does not attack
-            Engage(p, d);
+        {
+            if (gr.support && !(gr.tank < gr.subs.size() && &s == &gr.subs[gr.tank]))
+                EngageOrder(p, d);   // a dps whose threat hold dropped its victim keeps its hold
+            else
+                Engage(p, d);
+        }
         if (p->GetPowerType() == POWER_RAGE)
         {
             std::uint32_t const rage = p->GetPower(POWER_RAGE) / 10u;
@@ -4226,6 +4399,8 @@ bool GroupStep(std::string& failure)
             ++s.idle_s;
         if (s.melee ? !p->IsWithinMeleeRange(d) : p->GetExactDist(d) < 10.0f)
             ++(s.melee ? s.melee_far_s : s.ranged_close_s);
+        if (float const edge = p->GetDistance(d); s.closest < 0.0f || edge < s.closest)
+            s.closest = edge;
         // Where each bot stands against the dummy, 10 s and 60 s in (group 14: ret 103, elemental 0 and the beast master 147 stood 3.8 y from the dummy and
         // 3.8 above it, and the scorecard log never named the dummy's position or the bot's, so the cause of the stand was not readable).
         if (gr.measure_s == 10 || gr.measure_s == 60)
@@ -4236,6 +4411,23 @@ bool GroupStep(std::string& failure)
                         d->GetPositionX(), d->GetPositionY(), d->GetPositionZ(), p->GetExactDist(d), p->GetExactDist2d(d), int(p->IsWithinMeleeRange(d)), int(d->IsWithinLOSInMap(p)),
                         int(p->HasInArc(float(M_PI), d)), int(d->HasInArc(float(M_PI), p)), int(p->isAttackReady(BASE_ATTACK)), p->GetVictim() ? p->GetVictim()->GetName() : "-",
                         int(p->HasUnitState(UNIT_STATE_CASTING)), int(p->GetMotionMaster()->GetCurrentMovementGeneratorType()), ai && ai->last_rule_fired() ? ai->last_rule_fired() : "-");
+            // Every gate between a melee bot's victim and its swing (Unit::DoMeleeAttackIfReady, Unit::AttackerStateUpdate): the 239 arms bot held the
+            // dummy as its victim in melee range and facing it for the whole first run, out of combat, with no swing, no rage and no cast, and the line
+            // above names none of the gates, so the one that held it was not readable.
+            if (s.melee)
+            {
+                std::string negative;
+                for (auto const& [auraId, app] : p->GetAppliedAuras())
+                    if (!app->IsPositive())
+                        negative += fmt::format("{}{} {}", negative.empty() ? "" : ", ", auraId, app->GetBase()->GetSpellInfo()->SpellName->Str[LOCALE_enUS]);
+                TC_LOG_INFO("playerbot.v2", "[dmg_group] {} swing gates at {}s: melee_attacking {} stunned {} confused {} fleeing {} charging {} pacified {} disable_attacking {} disable_autoattack {} "
+                            "valid_target {} los_from_bot {} in_combat {} attack_timer {} mounted {} melee_spell {} negative auras: {}",
+                            s.name, gr.measure_s, int(p->HasUnitState(UNIT_STATE_MELEE_ATTACKING)), int(p->HasUnitState(UNIT_STATE_STUNNED)), int(p->HasUnitState(UNIT_STATE_CONFUSED)),
+                            int(p->HasUnitState(UNIT_STATE_FLEEING)), int(p->HasUnitState(UNIT_STATE_CHARGING)),
+                            int(p->HasUnitFlag(UNIT_FLAG_PACIFIED)), int(p->HasAuraType(SPELL_AURA_DISABLE_ATTACKING_EXCEPT_ABILITIES)), int(p->HasAuraType(SPELL_AURA_DISABLE_AUTOATTACK)),
+                            int(p->IsValidAttackTarget(d)), int(p->IsWithinLOSInMap(d)), int(p->IsInCombat()), p->getAttackTimer(BASE_ATTACK), int(p->IsMounted()),
+                            p->GetCurrentSpell(CURRENT_MELEE_SPELL) ? p->GetCurrentSpell(CURRENT_MELEE_SPELL)->GetSpellInfo()->Id : 0u, negative.empty() ? "none" : negative);
+            }
         }
         Powers const pt = p->GetPowerType();
         if (gr.support && s.has_mana)
@@ -4294,7 +4486,7 @@ bool GroupStep(std::string& failure)
         if (gr.run < gr.runs)
         {
             // Another run on the same buffs: everyone back to full, back in place, with fresh cooldowns, and the dummy's debuffs renewed.
-            // (A support scorecard leaves the boss's threat as it is: the tank keeps the aggro it had.)
+            // (A support scorecard's boss starts each run on the tank with its threat cleared: SupportBossStartOnTank.)
             ++gr.run;
             TC_LOG_INFO("playerbot.v2", "[dmg_group] run {} of {} done, starting the next", gr.run - 1, gr.runs);
             for (GroupSub const& s : gr.subs)
@@ -4303,12 +4495,15 @@ bool GroupStep(std::string& failure)
                     p->CombatStop(true);
                     p->GetSpellHistory()->ResetAllCooldowns();
                     TopUp(p);
+                    RenewOwnKit(p);
                 }
             d->SetFullHealth();
             GroupPlaceAll(d);
             GroupRaidBuffs();
             if (!gr.support)
                 GroupRaidDebuffs(d);
+            else
+                SupportBossStartOnTank(d);
             gr.phase = GroupPhase::Warm;
             gr.t = 0;
             return false;
@@ -4359,6 +4554,14 @@ bool Active() { return g_measuring.load(std::memory_order_relaxed); }
 bool IsDummy(ObjectGuid const& guid)
 {
     if (!g_measuring.load(std::memory_order_relaxed) && !g_group_mode.load(std::memory_order_relaxed))
+        return false;
+    std::lock_guard<std::mutex> lock(g_mu);
+    return !guid.IsEmpty() && guid == g_dummy;
+}
+
+bool IsSupportBoss(ObjectGuid const& guid)
+{
+    if (!g_group_mode.load(std::memory_order_relaxed) || !g_support_mode.load(std::memory_order_relaxed))
         return false;
     std::lock_guard<std::mutex> lock(g_mu);
     return !guid.IsEmpty() && guid == g_dummy;

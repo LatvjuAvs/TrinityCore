@@ -22,8 +22,21 @@ regroup, formation and spacing, tanks and markers), Assign a bot to an icon, You
   class and role.
 - Two switches beside it: Area spells (whispers `aoe_all on|off` to one of your bots; it applies to the whole group; off = no
   spell that hits more than one enemy) and CC (group order `crowdcontrol on|off`). The icon shows the state last sent.
+- Stance button (0.6.9), three steps: Defensive (the start setting: bots start nothing, fight what you pull or what attacks the
+  group), Aggressive (they also attack anything hostile within about 10 yards of you) and Passive (they attack nothing at all, not
+  even to defend; healers heal and buffs go on). Click for the next, right-click for the one before. Sent as `defensive`,
+  `aggressive` or `passive`, re-sent as `stance defensive|aggressive|nofight` to bots that join. ForeverBotsDB.stance is
+  defensive|aggressive|nofight (an older "passive" reads as defensive).
+- Ignore target and Clear (0.6.9): your target goes on the list of mobs your bots never attack, even when it attacks you (a beast
+  you tame); the button again on it takes it off, Clear empties the list. Group orders `ignore target` / `ignore clear`; the
+  server answers in a system line. Secure buttons, so they work in combat.
+- Arena (0.6.11), in the minimap button's menu: Arena 2v2, Arena 3v3 and Leave arena queue send `.bot arena 2|3|leave`. The
+  party leader queues the party; 2v2 needs a party of exactly 2 and 3v3 of exactly 3, your bots count. The other team is a real
+  party or a bot party the server makes. The same lines can be typed in chat.
 - One button per class and role: adds that bot (`.bot add <class> <role>`). It joins you at your level, geared,
   in your group.
+- Hired bots only (0.6.10, the server's Playerbot.Hire.Mode): when you must hire, the class and role buttons are hidden and a
+  line says where to hire bots instead (HIRE_REQ / HIRE_RESP, ForeverBots_Hire.lua). Quick party, Call saved and Raid ready stay.
 - Orders to the group: Follow, Stay, Attack (your target), Resume; Pull (your tank bots open on your target, the
   rest join once it is engaged), Flee (break off and run to you), Come (teleport to you), Stop (stop attacking and
   return to normal), Release (after a wipe: every dead bot releases its spirit, runs back to its corpse as a ghost,
@@ -50,6 +63,14 @@ regroup, formation and spacing, tanks and markers), Assign a bot to an icon, You
   face, line abreast behind you; tanks in front, healers at the back; slots are stable per bot and turn with you).
   None is the plain follow. It stays until you change it. In combat and in raid mechanics the raid plan's positions
   win; the spacing also scales the raid ranged / pre-pull spacing.
+- Positions tab (0.6.12, the last side tab, a Defensive Stance shield): pick a shape (Close, Circle, Arc, Far apart, Line,
+  Column, Spear, Arrow) and a gap (Tight about 2.5 yards, Normal 4, Wide 8), tick the bots (All, None, Tanks, Heals, Melee,
+  Ranged tick quickly; click a name to tick or untick it), then Place here (the shape centred where you stand, pointing the way
+  you face) or At target (round your target, facing you; Arc and Circle keep out of a boss's reach). The ticked bots run to
+  their spots and stay there; after a fight the group joined they walk back to their own spot. Tanks take the front (the tip
+  of a Spear or Arrow), healers the back. Follow lets the ticked bots follow you again. Sent as the hidden add-on message
+  `PLACE_REQ`; the same as a group order: `place <shape> [tight|normal|wide] [here|target] [names or all, tanks, healers,
+  melee, ranged, dps, group1..group8, a class]`, `place follow [who]`. The server answers in one system line.
 - Distance (the - / + stepper, 1 to 20 yards, one per click; `distance <n>` / `follow distance <n>` in party/raid chat, `/fb distance <n>`):
   how far the bots follow you out of combat; it also sets the formation spacing to the same yards. Saved in the addon
   (ForeverBotsDB.distance) and re-sent silently on login and when the group changes; the server keeps it per bot.
@@ -123,7 +144,7 @@ The `.bot` commands for your own bots (add, call, dismiss, save, list, regear an
 
 Timings (0.5.18): every handler the add-on gives the client is timed. A call over 15 ms prints one chat line naming it; `/fb perf` lists the slowest (`/fb perf reset` clears), and the list is saved as `perf` in the SavedVariables file at logout. `/fb part` lists the optional parts that run inside client code (menu, filters, reporter, bindhook); `/fb part <name> off` and `/reload` switch one off.
 
-Key bindings (0.2.2): Esc > Options > Key Bindings > AddOns > "WoW Forever Bots". Unbound by default; one entry each for Attack, Pull, Pull back, Follow, Stay, Resume, Stop attacking, Flee, Come, Fall back, Toggle stance and Show / hide the bot window. The order keys send the same line as the window buttons and work in combat.
+Key bindings (0.2.2): Esc > Options > Key Bindings > AddOns > "WoW Forever Bots". Unbound by default; one entry each for Attack, Pull, Pull back, Follow, Stay, Resume, Stop attacking, Flee, Come, Fall back, Toggle stance (Next stance since the stance button got three steps), Show / hide the bot window, and one key each for the stances Passive, Defensive and Aggressive and for Ignore my target and Clear ignored mobs. The order keys send the same line as the window buttons and work in combat.
 
 Lazy lock key (0.2.4, warlocks): one key that does the right next thing on your target. Each press casts one spell at an enemy, never a pet summon: the curse (Curse of Tongues on mana users, Curse of Agony on the rest), Corruption, Immolate and Siphon Life kept up, Conflagrate, Shadow Bolt as the filler (the free instant bolt on a Shadow Trance proc), Life Tap when mana runs low, Death Coil / Drain Life when your health is low. An enemy hitting you in melee gets Death Coil, then Howl of Terror when two or more are on you, then Fear (not on bosses, and not on mobs in dungeons and raids). Both on-use trinkets and your racial go whenever ready on a long fight, in the same press as the next spell. The wand takes over when mana is dry. Press it with no enemy selected to put Demon Armor up and summon your pet. It also sends your pet at the target. Bind it under "Lazy lock" and tap or mash it; it runs the server command `.playerbot lazy`, which you can also type.
 Attack (mouseover) key: hover a mob and press it; the mob becomes your target and the bots attack it. Group pings (the ping wheel, if your client has one): an Attack ping on an enemy sends the bots in, an On my way ping on the ground sends them there. Needs a server with the ping hooks.

@@ -130,6 +130,16 @@ static ArenaGeometry const& GeometryFor(uint16_t id)
         };
         return rl;
     }
+    // Mak'gora Arena (id 1169, Classic 1.60 map 2995 Hyjal Crater): the round crater east of Nordrassil, a flat floor about
+    // 200 yards across at height 1453.4 inside walls with no walkable slope (70707 navmesh). No pillars, no hazards.
+    if (id == 1169) {
+        static const ArenaGeometry mk = {
+            /*pillars*/ {},
+            /*hazards*/ {},
+            /*rally*/ 5440.0f, -2805.0f, 1453.4f
+        };
+        return mk;
+    }
     // Blade's Edge (id 5) — bridge box high-ground breaks LoS both ways.
     if (id == 5 || id == 875 || id == 907 || id == 908) {
         static const ArenaGeometry be = {
@@ -233,6 +243,8 @@ ARENA_FACTORY(TolViron3,         912,  "arena_tolviron_3")
 ARENA_FACTORY(BlackRookHold3,    913,  "arena_black_rook_hold_3")
 ARENA_FACTORY(Robodrome,         1025, "arena_robodrome")
 ARENA_FACTORY(EmpyreanDomain,    1041, "arena_empyrean_domain")
+// Classic 1.60 (Forever) arena.
+ARENA_FACTORY(Makgora,           1169, "arena_makgora")
 
 #undef ARENA_FACTORY
 

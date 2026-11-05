@@ -156,9 +156,15 @@ bool ShouldBloodrage(ApPredicateContext const& ctx)
 }
 void DoBloodrage(ApPredicateContext const&, BotIntentEmitter& e) { e.cast(BLOODRAGE); }
 
+// Renewed in its last seconds, not after it has gone: the shout is the whole party's, and a recast only once it had expired left the party
+// without it at every two-minute mark (244 support scorecard, paladin run 1: Battle Shout missing on four bots as the measurement began
+// at 19:39:14, the fury's recast at 19:39:15).
+constexpr int64 kBattleShoutRefreshMs = 3000;
 bool ShouldBattleShout(ApPredicateContext const& ctx)
 {
-    return Rage(ctx) >= 10 && Ready(ctx, BATTLE_SHOUT) && !ctx.bot.has_aura(BATTLE_SHOUT);
+    if (Rage(ctx) < 10 || !Ready(ctx, BATTLE_SHOUT)) return false;
+    AuraEntry const* bs = ctx.bot.find_aura(BATTLE_SHOUT);
+    return !bs || bs->remaining.count() < kBattleShoutRefreshMs;
 }
 void DoBattleShout(ApPredicateContext const&, BotIntentEmitter& e) { e.cast(BATTLE_SHOUT); }
 
@@ -371,6 +377,8 @@ bool ShouldRend(ApPredicateContext const& ctx)
     if (!HasLiveTarget(ctx) || Rage(ctx) < 10 || InStance(ctx, BERSERKER_STANCE)) return false;
     if (ctx.bot.knows_spell(MORTAL_STRIKE) || ctx.bot.knows_spell(BLOODTHIRST)) return false;
     if (VictimHpPct(ctx) < 40) return false;
+    // A bleed-immune mob never takes the aura, so the cast would repeat every GCD.
+    if (NearbyUnit const* v = ctx.bot.victim_info(); v && v->bleed_immune) return false;
     return (Ready(ctx, REND) && ctx.bot.victim_in_spell_range(REND)) && !ctx.bot.has_aura(REND, ctx.bot.victim());
 }
 void DoRend(ApPredicateContext const& ctx, BotIntentEmitter& e) { e.cast(REND, ctx.bot.victim()); }
@@ -723,7 +731,8 @@ bool TankOnDuty(ApPredicateContext const& ctx)
 }
 
 // Last Stand at 25% health; Shield Wall at 20%, or at 25% once Last Stand is
-// spent (up already, on cooldown or not trained).
+// spent (up already, on cooldown or not trained). Shield Wall needs a shield
+// (70532 data: equipped armor, subclass mask 64), as Shield Bash and Block do.
 bool ShouldLastStand(ApPredicateContext const& ctx)
 {
     return ctx.bot.in_combat() && ctx.bot.hp_pct() <= 25 && TankOnDuty(ctx) && Ready(ctx, LAST_STAND);
@@ -739,7 +748,7 @@ bool ShouldShieldWall(ApPredicateContext const& ctx)
     int32 const hp = ctx.bot.hp_pct();
     bool const last_stand_spent = !Ready(ctx, LAST_STAND) || ctx.bot.has_aura(LAST_STAND);
     return ctx.bot.in_combat() && (hp <= 20 || (hp <= 25 && last_stand_spent)) && TankOnDuty(ctx)
-        && InStance(ctx, DEFENSIVE_STANCE) && Ready(ctx, SHIELD_WALL) && !ctx.bot.has_aura(SHIELD_WALL);
+        && InStance(ctx, DEFENSIVE_STANCE) && Interrupt::HasShield(ctx.bot) && Ready(ctx, SHIELD_WALL) && !ctx.bot.has_aura(SHIELD_WALL);
 }
 void DoShieldWall(ApPredicateContext const& ctx, BotIntentEmitter& e)
 {
@@ -956,12 +965,17 @@ void DoSunder(ApPredicateContext const& ctx, BotIntentEmitter& e) { e.cast(SUNDE
 constexpr int32 kDemoShoutRage = 25;
 bool ShouldDemoShout(ApPredicateContext const& ctx)
 {
-    return ctx.bot.in_combat() && HasLiveTarget(ctx) && Rage(ctx) >= kDemoShoutRage
+    if (!ctx.bot.in_combat() || !HasLiveTarget(ctx))
+        return false;
+    bool const ok = Rage(ctx) >= kDemoShoutRage
         && Ready(ctx, DEMORALIZING_SHOUT)
         && TankThreat::DemoRefreshWorth(ctx.bot, 10.0f)
         && MeleeAoeSafe(ctx.bot, InRaid(ctx), 10.0f, /*tank*/ true, "Demoralizing Shout")
         // No damage (a sheep survives it), but it aggroes every mob it lands on.
         && AoeSafeAroundSelf(ctx.bot, 10.0f, /*damaging*/ false, /*tank*/ true, "Demoralizing Shout");
+    if (!ok)
+        TankThreat::NoteDemoSkip(ctx.bot, "Demoralizing Shout", Rage(ctx), Ready(ctx, DEMORALIZING_SHOUT));
+    return ok;
 }
 void DoDemoShout(ApPredicateContext const&, BotIntentEmitter& e) { e.cast(DEMORALIZING_SHOUT); }
 

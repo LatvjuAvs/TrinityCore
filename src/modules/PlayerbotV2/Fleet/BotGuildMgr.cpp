@@ -122,6 +122,14 @@ void BotGuildMgr::LoadFromDb()
     // an empty result and the manager simply reports "0 bot guilds
     // active, 6 slots open per faction" — which is correct for the
     // pre-migration state.
+    //
+    // Rows of guilds that no longer exist go first. A wipe of `guild` restarts its ids, so an old row would otherwise make
+    // the next guild with that id (a player's guild too) a bot guild with the dead guild's faction and founder.
+    CharacterDatabase.DirectExecute(
+        "DELETE m FROM bot_guild_meta m LEFT JOIN guild g ON g.guildid = m.guild_id WHERE g.guildid IS NULL");
+    CharacterDatabase.DirectExecute(
+        "DELETE mm FROM bot_guild_member_meta mm LEFT JOIN guild g ON g.guildid = mm.guild_id WHERE g.guildid IS NULL");
+
     QueryResult result = CharacterDatabase.Query(
         "SELECT m.guild_id, m.faction, m.theme, m.founder_low, m.rival_low, m.member_cap "
         "FROM bot_guild_meta m "
@@ -654,6 +662,8 @@ void BotGuildMgr::OnCharterSucceeded(Faction f, uint64 founder_low,
     // bot_guild_name_reserved to the implicit "in use" set tracked by
     // sGuildMgr->GetGuildByName once the guild row is created — Release
     // here just drops the reservation row).
+    // REPLACE: a row left by an earlier guild with this id (guild table wiped while the server ran) must not make the INSERT
+    // fail and leave this guild with that guild's faction and founder.
     if (rival_low != 0)
     {
         CharacterDatabase.DirectPExecute(

@@ -18,6 +18,7 @@
 #include "Bot/BotArchetype.h"
 #include "Bot/BotRegistry.h"
 #include "Fleet/BotGroupBuilder.h"
+#include "Fleet/HireMgr.h"
 #include "Fleet/InstanceGroupCap.h"
 #include "Fleet/OwnerRegistry.h"
 #include "GroupFinderListings.h"
@@ -389,15 +390,22 @@ bool LfgFillNow(Player* leader, Playerbot::Role ownRole, std::string& msg)
         size = itr->second;
     if (Group const* group = leader->GetGroup(); group && group->isRaidGroup())
         size = std::max<uint32>(size, 10);
-    LfgRoleGap const gap = GapOf(leader, ownRole, size);
+    LfgRoleGap gap;
+    std::string report;
+    uint32 const started = LfgFillToSize(leader, ownRole, size, gap, report);
     if (!gap.Total())
     { msg = "Your group is already full: " + std::to_string(size) + " players."; return true; }
-    std::string report;
-    uint32 const started = FillGap(leader, gap, size, report);
     TC_LOG_INFO("playerbot.v2", "[lfg] {}: .bot lfg, party of {}, missing {} -> {} bot(s) started.{}", leader->GetName(), size, GapText(gap), started, report);
     msg = std::to_string(started) + " bot(s) are joining (" + GapText(gap) + " missing)." + report;
     g_pending.erase(leader->GetGUID().GetCounter());
     return true;
+}
+
+uint32 LfgFillToSize(Player* leader, Playerbot::Role ownRole, uint32 size, LfgRoleGap& gap, std::string& report)
+{
+    gap = GapOf(leader, ownRole, size);
+    g_lastSize[leader->GetGUID().GetCounter()] = size;
+    return gap.Total() ? FillGap(leader, gap, size, report) : 0;
 }
 
 namespace
@@ -454,7 +462,10 @@ namespace
         for (GroupReference const& ref : group->GetMembers())
             if (Player const* member = ref.GetSource(); member && member != human && !IsHuman(member))
             {
-                Playerbot::Services::Owners().SetOwner(member->GetGUID().GetCounter(), human->GetSession()->GetAccountId(), 0);
+                // In hired mode (Playerbot.Hire.*) the group's bots play with the player but are nobody's to keep: they stay world bots,
+                // ordered as group members, so joining a listed group never becomes a free hire.
+                if (!Fleet::HireMgr::Instance().MustHire(human))
+                    Playerbot::Services::Owners().SetOwner(member->GetGUID().GetCounter(), human->GetSession()->GetAccountId(), 0);
                 ++bots;
             }
         TC_LOG_INFO("playerbot.v2", "[lfg] {} joined the listed bot group of {}: {} bot(s) are now their companions", human->GetName(),
@@ -775,6 +786,31 @@ bool LfgBotGroupCanTake(Player* member, Player* applicant)
         return false;
     Player const* leader = ObjectAccessor::FindConnectedPlayer(group->GetLeaderGUID());
     return leader && leader->GetTeam() == applicant->GetTeam();
+}
+
+Player* LfgBotGroupMemberFor(Player* applicant, uint32 map)
+{
+    if (!IsHuman(applicant) || !Playerbot::Services::Initialized() || applicant->GetGroup())
+        return nullptr;
+    bool const alliance = applicant->GetTeam() == ALLIANCE;
+    uint32 const level = applicant->GetLevel();
+    for (ListedBotGroup const& g : g_botGroups)
+    {
+        if (g.alliance != alliance)
+            continue;
+        ListedActivity const* act = nullptr;
+        for (ListedActivity const& a : Playerbot::Services::Config().lfg_bot_groups_activities())
+            if (a.activity == g.activity) { act = &a; break; }
+        if (!act || (map && act->map != map))
+            continue;
+        if (level + 2 < act->levelMin || level > uint32(act->levelMax) + 2)
+            continue;
+        Player* leader = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(g.leader));
+        if (!leader || !leader->GetGroup() || leader->GetTeam() != applicant->GetTeam())
+            continue;
+        return leader;
+    }
+    return nullptr;
 }
 
 bool LfgBotGroupJoinRequest(Player* member, Player* applicant)

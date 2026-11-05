@@ -114,8 +114,11 @@ uint32 ArmorSpell(ApPredicateContext const& ctx)
 // designated Felhunter warlocks (one per subgroup, at most two per raid, by
 // guid - Spell Lock interrupts) summon the Felhunter, the rest the Imp
 // (Interrupt::ClassicWarlockPet).
+// The owner's demon ("prefer demon voidwalker"; Bot/OwnerPicks.h) wins once its summon is known.
 uint32 PetSpell(ApPredicateContext const& ctx)
 {
+    if (uint32 const pin = ctx.bot.owner_pick(OwnerPicks::Demon); pin && ctx.bot.knows_spell(pin))
+        return pin;
     return Interrupt::ClassicWarlockPet(ctx.bot, &ctx.group);
 }
 
@@ -194,15 +197,17 @@ bool ShouldDemonicSacrifice(ApPredicateContext const& ctx)
     // spec 266 warlock does it solo and in dungeons too (175 demonology: the Imp stayed out, 24 dps, without the +15 % Shadow that is the point of the build).
     // Out of combat in a raid; a spec 266 warlock also in combat, so a lost buff is made again (180 demonology: the Imp was summoned at the start of a leg
     // and the fight began before the sacrifice rule's out-of-combat window).
-    return (ctx.bot.spec() == 266 || (ctx.bot.is_in_raid() && !ctx.bot.in_combat())) && ctx.bot.has_pet() && ctx.bot.raw().pet.pet_family == CREATURE_FAMILY_IMP
+    // Not with a demon the owner picked ("prefer demon imp"): the owner wants it out.
+    return !ctx.bot.owner_pick(OwnerPicks::Demon)
+        && (ctx.bot.spec() == 266 || (ctx.bot.is_in_raid() && !ctx.bot.in_combat())) && ctx.bot.has_pet() && ctx.bot.raw().pet.pet_family == CREATURE_FAMILY_IMP
         && !HasSacrificeBuff(ctx) && Ready(ctx, DEMONIC_SACRIFICE) && ctx.bot.current_cast_spell_id() == 0;
 }
 void DoDemonicSacrifice(ApPredicateContext const&, BotIntentEmitter& e) { e.cast(DEMONIC_SACRIFICE); }
 
 bool ShouldSummonPet(ApPredicateContext const& ctx)
 {
-    if (ctx.bot.in_combat() || ctx.bot.current_cast_spell_id() != 0) return false;
-    if (ctx.bot.knows_spell(DEMONIC_SACRIFICE) && HasSacrificeBuff(ctx)) return false;
+    if (ctx.bot.in_combat() || ctx.bot.current_cast_spell_id() != 0 || ctx.bot.owner_pet_off()) return false;
+    if (ctx.bot.knows_spell(DEMONIC_SACRIFICE) && HasSacrificeBuff(ctx) && !ctx.bot.owner_pick(OwnerPicks::Demon)) return false;
     uint32 const want = PetSpell(ctx);
     if (!want || !Ready(ctx, want)) return false;
     // Out of combat with the wrong demon out (joined a raid with the

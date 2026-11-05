@@ -13,7 +13,8 @@
 // Freezing Trap goes down before a pull of a pack (1.12 traps can't be set
 // in combat), so the first add to reach the hunter freezes.
 // Skipped: Feign Death, Scatter Shot, Viper Sting, aspect swapping
-// (Monkey / Cheetah / Viper) - Hawk is the only aspect maintained.
+// (Monkey / Cheetah / Viper) - Hawk is the aspect maintained unless the
+// owner picked another ("prefer aspect monkey", Bot/OwnerPicks.h).
 //
 // Priorities follow Karrz's ike3 vanilla strategies (Karrz1/wow-1.12
 // raid10-revamp, playerbot/strategy/hunter/*Strategy.cpp, MANGOSBOT_ZERO).
@@ -115,11 +116,22 @@ int32 VictimHpPct(ApPredicateContext const& ctx)
 
 // ======================= Upkeep / pet =======================
 
-bool ShouldAspectHawk(ApPredicateContext const& ctx)
+// Hawk, or the owner's aspect ("prefer aspect monkey"; Bot/OwnerPicks.h) once known. Cheetah and Pack daze the group when it is
+// hit, so they are held out of combat only and a fight brings back Hawk.
+uint32 WantedAspect(ApPredicateContext const& ctx)
 {
-    return Ready(ctx, ASPECT_OF_THE_HAWK) && !ctx.bot.has_aura(ASPECT_OF_THE_HAWK);
+    uint32 const pin = ctx.bot.owner_pick(OwnerPicks::Aspect);
+    if (pin && ctx.bot.knows_spell(pin) && !(OwnerPicks::TravelAspect(pin) && ctx.bot.in_combat()))
+        return pin;
+    return ASPECT_OF_THE_HAWK;
 }
-void DoAspectHawk(ApPredicateContext const&, BotIntentEmitter& e) { e.cast(ASPECT_OF_THE_HAWK); }
+
+bool ShouldAspect(ApPredicateContext const& ctx)
+{
+    uint32 const want = WantedAspect(ctx);
+    return Ready(ctx, want) && !ctx.bot.has_aura(want);
+}
+void DoAspect(ApPredicateContext const& ctx, BotIntentEmitter& e) { e.cast(WantedAspect(ctx)); }
 
 bool ShouldTrueshotAura(ApPredicateContext const& ctx)
 {
@@ -129,7 +141,7 @@ void DoTrueshotAura(ApPredicateContext const&, BotIntentEmitter& e) { e.cast(TRU
 
 bool ShouldCallPet(ApPredicateContext const& ctx)
 {
-    if (ctx.bot.in_combat() || !ctx.bot.pet_guid().IsEmpty()) return false;
+    if (ctx.bot.in_combat() || !ctx.bot.pet_guid().IsEmpty() || ctx.bot.owner_pet_off()) return false;
     if (!Ready(ctx, CALL_PET)) return false;
     for (auto const& sp : ctx.bot.stable_pets())
         if (sp.slot_kind == 0 && sp.creature_id != 0)
@@ -140,8 +152,8 @@ void DoCallPet(ApPredicateContext const&, BotIntentEmitter& e) { e.cast(CALL_PET
 
 bool ShouldRevivePet(ApPredicateContext const& ctx)
 {
-    // Only when a pet existed and died; an empty guid means never tamed.
-    return !ctx.bot.pet_guid().IsEmpty() && !ctx.bot.has_pet() && Ready(ctx, REVIVE_PET);
+    // Only when a pet existed and died; an empty guid means never tamed. Not while the owner keeps the pet away ("pet off").
+    return !ctx.bot.owner_pet_off() && !ctx.bot.pet_guid().IsEmpty() && !ctx.bot.has_pet() && Ready(ctx, REVIVE_PET);
 }
 void DoRevivePet(ApPredicateContext const&, BotIntentEmitter& e) { e.cast(REVIVE_PET); }
 
@@ -463,7 +475,7 @@ ApRule const kRules[] = {
     { ShouldCallPet,       DoCallPet,       "classic_hunter:call_pet" },
     { ShouldRevivePet,     DoRevivePet,     "classic_hunter:revive_pet" },
     { ShouldMendPet,       DoMendPet,       "classic_hunter:mend_pet" },
-    { ShouldAspectHawk,    DoAspectHawk,    "classic_hunter:aspect_of_the_hawk" },
+    { ShouldAspect,        DoAspect,        "classic_hunter:aspect" },
     { ShouldTrueshotAura,  DoTrueshotAura,  "classic_hunter:trueshot_aura" },
     { ShouldPrePullTrap,   DoPrePullTrap,   "classic_hunter:freezing_trap" },
     { ShouldBestialWrath,  DoBestialWrath,  "classic_hunter:bestial_wrath" },
@@ -471,7 +483,7 @@ ApRule const kRules[] = {
     { ShouldReadiness,     DoReadiness,     "classic_hunter:readiness" },
     { ShouldHuntersMark,   DoHuntersMark,   "classic_hunter:hunters_mark" },
     { ShouldSchoolShot,    DoSchoolShot,    "classic_hunter:school_shot" },
-    // Instant shots on their cooldowns first, the 3 s Aimed Shot cast (it holds Auto Shot back while it is cast) only in the gaps.
+    // Instant shots on their cooldowns first, the 2 s Aimed Shot cast (it holds Auto Shot back while it is cast) only in the gaps.
     { ShouldMultiShot,     DoMultiShot,     "classic_hunter:multi_shot" },
     { ShouldSerpentSting,  DoSerpentSting,  "classic_hunter:serpent_sting" },
     { ShouldArcaneShot,    DoArcaneShot,    "classic_hunter:arcane_shot" },

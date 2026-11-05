@@ -80,7 +80,8 @@ Net.Unescape = Unescape
 -- yourself to you as well), which is skipped.
 local ANSWERS = { ROSTER_RESP = true, BOT_DETAIL_RESP = true, STATS_RESP = true, PONG = true, ALTS_RESP = true,
                   EVENT_PUSH = true, SUMMON_RESP = true, LOGIN_RESP = true, LOGOUT_RESP = true, SELF_RESP = true,
-                  GEAR_RESP = true, BAGS_RESP = true, QUESTS_RESP = true, SPEC_RESP = true, LFG_RESP = true }
+                  GEAR_RESP = true, BAGS_RESP = true, QUESTS_RESP = true, SPEC_RESP = true, LFG_RESP = true,
+                  ASSIGN_RESP = true }
 Net.ANSWERS = ANSWERS
 
 Net.seq = math.random(1, 0x3fffffff)
@@ -267,28 +268,56 @@ if C_Timer and C_Timer.NewTicker then C_Timer.NewTicker(2, Net.Sweep) end
 
 -- Asks for answers as add-on whispers first, then as system lines; the first that comes back is kept (the server remembers the
 -- choice for this account). verbose: /fb ping prints what it found.
+-- Net.modeGrouped: the last answer was asked for from inside a group (on the group channel). A "none" found alone says little:
+-- clients from 70658 on never pass an add-on whisper to yourself to the server, so alone the ping cannot get through at all.
+Net.negotiating, Net.modeGrouped, Net.waiters = false, false, {}
+local function Grouped() return ns.SelfChannel() ~= "WHISPER" end
+local function Settled(mode)
+    Net.mode, Net.negotiating = mode, false
+    local waiters = Net.waiters
+    Net.waiters = {}
+    for _, fn in ipairs(waiters) do pcall(fn) end
+end
 function Net.Negotiate(verbose)
     local t0 = debugprofilestop and debugprofilestop() or (Now() * 1000)
     local function ms() return (debugprofilestop and debugprofilestop() or (Now() * 1000)) - t0 end
+    Net.negotiating, Net.modeGrouped = true, Grouped()
     Net.Request("PING", { "0", "addon" }, function(fields)
         if fields then
-            Net.mode = "addon"
+            Settled("addon")
             if verbose then Print(string.format("server answers window requests (%.0f ms, add-on messages).", ms())) end
             return
         end
         Net.Request("PING", { "0", "sys" }, function(fields2, why)
             if fields2 then
-                Net.mode = "sys"
+                Settled("sys")
                 if verbose then Print(string.format("server answers window requests (%.0f ms, hidden system lines: this client drops add-on whispers).", ms())) end
                 return
             end
-            Net.mode = "none"
+            Settled("none")
             if verbose then
                 Print("the server did not answer the window request (" .. tostring(why) .. "): it may be older than this add-on.")
                 Print(string.format("seen since login: %d add-on answers, %d system answers, %d own requests echoed.", Net.seen.addon, Net.seen.sys, Net.seen.echo))
             end
         end)
     end)
+end
+
+-- The route is settled: a working one, or "none" found from inside a group (an older server without the window requests).
+function Net.ModeKnown()
+    if not prefixOk then return true end   -- no prefix, no route: asking again would never change that
+    return Net.mode == "addon" or Net.mode == "sys" or (Net.mode == "none" and Net.modeGrouped)
+end
+
+-- Calls fn once the route is settled: at once when it is, after the ping running now, or after a new ping (on the group channel
+-- when grouped). fn runs at most once per call.
+function Net.EnsureMode(fn)
+    if Net.ModeKnown() and not Net.negotiating then
+        pcall(fn)
+        return
+    end
+    Net.waiters[#Net.waiters + 1] = fn
+    if not Net.negotiating then Net.Negotiate(false) end
 end
 
 -- /fb ping: one round trip to the bot module, so a missing or old server shows at once.

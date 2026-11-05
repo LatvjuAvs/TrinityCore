@@ -128,8 +128,10 @@ public:
 
     // Bots a fill created or reused for one side of a battleground type in the last 90 s. Their setup runs for a while before they queue,
     // and a top-up that does not count them asks again for the same places: the surplus formed new instances (WSG 2026-10-21: ten
-    // from one player's queue).
-    static uint32 JitInFlight(uint32 bg_type_id, bool alliance, uint32 now_ms);
+    // from one player's queue). Timed on getMSTime(), the clock the batches are stamped with: the module tick's now_ms counts from the
+    // first world update, minutes behind getMSTime(), so every batch looked expired and the count was always 0 (WSG 2026-10-24: a second
+    // all-bot instance opened beside the player's).
+    static uint32 JitInFlight(uint32 bg_type_id, bool alliance);
 };
 
 } // namespace Playerbot::V2::Fleet

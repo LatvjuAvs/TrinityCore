@@ -5,6 +5,7 @@
 #include "../Bot/BotIntentEmitter.h"
 #include "../Bot/BotRegistry.h"
 #include "../Bot/BotSnapshot.h"
+#include "../Bot/ClassicUpkeep.h"
 #include "../Bot/PlayerCraftOrder.h"
 #include "../Services.h"
 #include "../Threading/IntentQueue.h"
@@ -17,6 +18,7 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
+#include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "World.h"
@@ -59,6 +61,7 @@ struct Job
     std::uint32_t mail_ms = 0;
     std::uint32_t mailing = 0;            // items handed to the mail intents
     std::uint32_t before_mail = 0;        // the bot's stock when the mail intents were pushed
+    bool told_mana = false;               // the requester was told the bot drinks first
     Phase phase = Phase::Crafting;
 };
 
@@ -136,6 +139,10 @@ std::vector<pc::Option> Options(Player const* bot)
             o.yield = std::max<std::uint32_t>(1u, std::uint32_t(std::max(eff.CalcValueAsInt(bot), 1)));
             o.name = Lower(t->GetName(sWorld->GetDefaultDbcLocale()));
             o.rank = std::uint32_t(std::max(t->GetBaseRequiredLevel(), 0)) * 1000u + std::min<std::uint32_t>(t->GetBaseItemLevel(), 999u);
+            if (si->SpellName)
+                o.spell_name = Lower(si->SpellName->Str[sWorld->GetDefaultDbcLocale()]);
+            if (::Playerbot::Classic::ConsumableKind kind = {}; ::Playerbot::Classic::IsMageConjure(spell, kind))
+                o.conjured = kind == ::Playerbot::Classic::ConsumableKind::Drink ? pc::Conjured::Water : pc::Conjured::Food;
             out.push_back(std::move(o));
             break;
         }
@@ -155,6 +162,30 @@ pc::Delivery DeliveryOf(Player const* bot, std::uint32_t item)
     ItemTemplate const* t = sObjectMgr->GetItemTemplate(item);
     std::vector<Item*> const held = bot->GetItemListByEntry(item, false);
     return pc::DeliveryFor(t && t->HasFlag(ITEM_FLAG_CONJURED), !held.empty() && held.front()->IsSoulBound());
+}
+
+// A food / drink aura is up (the drink rule sat the bot down).
+bool Drinking(Player const* bot)
+{
+    for (auto const& [id, app] : bot->GetAppliedAuras())
+    {
+        SpellSpecificType const spec = app->GetBase()->GetSpellInfo()->GetSpellSpecific();
+        if (spec == SPELL_SPECIFIC_DRINK || spec == SPELL_SPECIFIC_FOOD_AND_DRINK)
+            return true;
+    }
+    return false;
+}
+
+// The mana one cast of `spell` costs the bot now, 0 for a spell without a mana cost.
+std::uint32_t ManaCost(Player const* bot, std::uint32_t spell)
+{
+    SpellInfo const* si = sSpellMgr->GetSpellInfo(spell, DIFFICULTY_NONE);
+    if (!si)
+        return 0;
+    for (SpellPowerCost const& cost : si->CalcPowerCost(bot, si->GetSchoolMask()))
+        if (cost.Power == POWER_MANA)
+            return std::uint32_t(std::max(cost.Amount, 0));
+    return 0;
 }
 
 void Finish(Job const& j, Player const* bot, std::string const& text)
@@ -196,7 +227,7 @@ bool Order(Player* requester, Player* bot, std::string const& text)
         return true;
     }
 
-    int const idx = pc::Match(req, opts);
+    int const idx = pc::Match(req, opts, requester->GetLevel());
     if (idx < 0)
     {
         Say(bot, to, "I don't know a recipe for that.");
@@ -351,7 +382,16 @@ void Tick(std::uint32_t now_ms)
                 }
                 else if (!bot->IsNonMeleeSpellCast(false) && !bot->IsInCombat() && bot->IsAlive() && now_ms - j.last_cast_ms >= kCastGapMs)
                 {
-                    if (bot->IsMounted() && j.dismounts < kMaxDismounts)
+                    if (pc::WaitForMana(Drinking(bot), bot->GetPower(POWER_MANA), bot->GetMaxPower(POWER_MANA), ManaCost(bot, j.spell)))
+                    {
+                        // Not a cast: the give-up count stands still while the bot drinks (the order deadline still runs).
+                        if (!j.told_mana)
+                        {
+                            Say(bot, j.requester, "I'm out of mana, I'll drink first and then finish your order.");
+                            j.told_mana = true;
+                        }
+                    }
+                    else if (bot->IsMounted() && j.dismounts < kMaxDismounts)
                     {
                         // The spell code refuses every cast of a mounted caster (NOT_MOUNTED): get off first.
                         Push(bot, DismountIntent{});

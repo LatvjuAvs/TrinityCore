@@ -22,6 +22,7 @@
 #include "Bot/ClassicUpkeep.h"
 #include "Bot/AlwaysBuffs.h"
 #include "Bot/DrinkSayRule.h"
+#include "Bot/RecoverRules.h"   // Classic::LedMaySitDown
 #include "Bot/States/MaintainHelpers.h"   // States::DungeonLootRoll
 #include "SharedDefines.h"
 #include "RaceMask.h"        // RACE_UNDEAD_PLAYER
@@ -118,6 +119,8 @@ bool CannibalizeFire(BotSnapshotView const& s, BotAI& ai,
 // id cannot loop.
 constexpr uint64 kAlwaysBuffLockKey = 0xA1B0F;
 
+} // anonymous namespace
+
 BuffSet AlwaysBuffSetOf(BotSnapshotView const& s, GroupSnapshotView const& g)
 {
     switch (Classic::RaidConsumableRoleOf(s, g))
@@ -135,14 +138,6 @@ BuffSet AlwaysBuffSetOf(BotSnapshotView const& s, GroupSnapshotView const& g)
     return (s.cls() == CLASS_ROGUE || s.cls() == CLASS_DRUID) ? BuffSet::MeleeAgility : BuffSet::MeleeStrength;
 }
 
-bool AlwaysHasAura(BotSnapshotView const& s, uint32 id)
-{
-    for (AuraEntry const& a : s.raw().auras.own_auras)
-        if (a.spell_id == id)
-            return true;
-    return false;
-}
-
 // The kinds on where the bot stands, as the mask the intent carries.
 uint8 AlwaysMask(BotSnapshotView const& s, GroupSnapshotView const& g)
 {
@@ -151,6 +146,16 @@ uint8 AlwaysMask(BotSnapshotView const& s, GroupSnapshotView const& g)
     return uint8(((buffs && Classic::AlwaysOn(s, AlwaysSwitch::Consumables, &g)) ? kAlwaysMaskConsumables : 0)
                | ((buffs && Classic::AlwaysOn(s, AlwaysSwitch::WorldBuffs, &g)) ? kAlwaysMaskWorldBuffs : 0)
                | (Classic::AlwaysOn(s, AlwaysSwitch::Repair, &g) ? kAlwaysMaskRepair : 0));
+}
+
+namespace {
+
+bool AlwaysHasAura(BotSnapshotView const& s, uint32 id)
+{
+    for (AuraEntry const& a : s.raw().auras.own_auras)
+        if (a.spell_id == id)
+            return true;
+    return false;
 }
 
 // A row is out of step when its kind is on here and the aura is missing, or off here and the aura is on the bot. A Stone row has
@@ -214,7 +219,7 @@ bool OocPotionGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&
     if (ai.effective_role(s) == Role::Healer) return false;
     const auto thr = GetIdleConsumeThresholds(ai);
     if (s.hp_pct() >= thr.potion_below) return false;
-    if (Classic::SafeToRecover(s, &g) && Classic::BestConsumable(s, Classic::ConsumableKind::Food))
+    if (Classic::SafeToRecover(s, &g) && Classic::RecoveryConsumable(s, Classic::ConsumableKind::Food))
         return false;   // eat instead (idle:ooc_eat_food)
     return Classic::BestConsumable(s, Classic::ConsumableKind::HealingPotion) != 0;
 }
@@ -301,6 +306,28 @@ int32 OocDrinkStart(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const
     return Classic::OocDrinkStartManaPct(s, &g, kOocDrinkBelowManaPct);
 }
 
+// A player's bots (grouped, led by him) rest only when they need it and until full (Classic::LedMaySitDown); every other bot keeps the
+// personality's food mark and the pull-ready drink marks.
+bool LedRest(BotSnapshotView const& s)
+{
+    return s.in_group() && s.is_led_by_player();
+}
+
+Classic::RecoveryPick OocRecoveryPick(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const& g, uint32 now_ms)
+{
+    int32 hp = GetIdleConsumeThresholds(ai).food_floor;
+    int32 mana = OocDrinkStart(s, ai, g, now_ms);
+    bool const led = LedRest(s);
+    if (led)
+    {
+        hp = std::min<int32>(hp, Classic::kLedEatBelowHpPct);
+        // The raid's wait for a boss pull under the owner's Hold is a drink to full on purpose (OocDrinkStart): it stays.
+        if (mana != Classic::kHeldRaidHealerManaPct)
+            mana = std::min<int32>(mana, Classic::kLedDrinkBelowManaPct);
+    }
+    return Classic::PickRecovery(s, hp, mana, led);
+}
+
 bool OocEatFoodGate(BotSnapshotView const& s, BotAI& ai,
                     GroupSnapshotView const& g, uint32 now_ms)
 {
@@ -325,9 +352,17 @@ bool OocEatFoodGate(BotSnapshotView const& s, BotAI& ai,
                 return false;
         }
     }
-    Classic::RecoveryPick const pick = Classic::PickRecovery(s, GetIdleConsumeThresholds(ai).food_floor, OocDrinkStart(s, ai, g, now_ms));
+    Classic::RecoveryPick const pick = OocRecoveryPick(s, ai, g, now_ms);
     if (pick.item)
-        return !s.raw().movement.is_moving;
+    {
+        if (s.raw().movement.is_moving)
+            return false;
+        // Not while the group walks on, nor straight back down after the follow got it up.
+        if (LedRest(s) && !Classic::LedMaySitDown({ Classic::IsEating(s) || Classic::IsDrinking(s), ai.since_rest_broken_ms(now_ms),
+                                                     ai.since_anchor_moved_ms(now_ms) }))
+            return false;
+        return true;
+    }
     return pick.hold;
 }
 
@@ -335,7 +370,7 @@ bool OocEatFoodFire(BotSnapshotView const& s, BotAI& ai,
                     GroupSnapshotView const& g,
                     BotIntentEmitter& emit, uint32 now_ms)
 {
-    Classic::RecoveryPick const pick = Classic::PickRecovery(s, GetIdleConsumeThresholds(ai).food_floor, OocDrinkStart(s, ai, g, now_ms));
+    Classic::RecoveryPick const pick = OocRecoveryPick(s, ai, g, now_ms);
     if (pick.item)
     {
         emit.emit(UseItemByEntryIntent{pick.item, s.raw().guid});

@@ -761,6 +761,8 @@ void BotQueueFiller::Fill(FillRequest const& req)
                     Field const* f = reuse_res->Fetch();
                     uint64 const g = f[0].GetUInt64();
                     uint8 const c = f[1].GetUInt8();
+                    // A scenario test character (Tier 3 test gear, the scorecard raids) never fills a battleground or a Group Finder slot.
+                    if (::Playerbot::Pool::IsScenarioBot(g)) continue;
                     cands.push_back({ g, c, spread ? ClassicRoleRollFor(g, c) : uint8(0), false });
                 } while (reuse_res->NextRow());
 
@@ -1263,10 +1265,10 @@ Placement ChoosePlacement(Team team, uint32 need, uint32 bg_type_id, uint8 brack
             best_humans = humans; best_bots = bots;
         }
     };
-    BattlegroundTemplate const* tmpl = sBattlegroundMgr->GetBattlegroundTemplateByTypeId(BattlegroundTypeId(bg_type_id));
-    if (!tmpl) return best;
-    for (int32 map_id : tmpl->MapIDs)
-        for (Battleground* bg : sBattlegroundMgr->GetBGFreeSlotQueueStore(map_id))
+    if (!sBattlegroundMgr->GetBattlegroundTemplateByTypeId(BattlegroundTypeId(bg_type_id))) return best;
+    // a running instance of this type can sit in its own queue's list or in a random/brawl queue's list
+    for (auto const& [_, free_slot_store] : sBattlegroundMgr->GetBGFreeSlotQueues())
+        for (Battleground* bg : free_slot_store)
             if (bg && uint32(bg->GetTypeID()) == bg_type_id) consider(bg);
     // full instances leave the free-slot store: reach them through the bots inside
     for (BotId id : Services::Lifecycle().snapshot_ids())
@@ -1413,12 +1415,13 @@ void BotQueueFiller::MakeRoomForRealPlayers(uint32 now_ms)
     }
 }
 
-uint32 BotQueueFiller::JitInFlight(uint32 bg_type_id, bool alliance, uint32 now_ms)
+uint32 BotQueueFiller::JitInFlight(uint32 bg_type_id, bool alliance)
 {
     auto const it = g_jit_in_flight.find((bg_type_id << 1) | (alliance ? 1u : 0u));
     if (it == g_jit_in_flight.end())
         return 0;
-    std::erase_if(it->second, [now_ms](JitBatch const& b) { return now_ms - b.at_ms >= JitInFlightMs; });
+    uint32 const now_ms = getMSTime();
+    std::erase_if(it->second, [now_ms](JitBatch const& b) { return getMSTimeDiff(b.at_ms, now_ms) >= JitInFlightMs; });
     uint32 total = 0;
     for (JitBatch const& b : it->second)
         total += b.count;

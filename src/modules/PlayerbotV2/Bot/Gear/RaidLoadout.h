@@ -28,6 +28,20 @@ struct EnchantWish
 // of caster gloves (2 fire, 4 frost, 5 shadow; anything else = no school gloves). Healers take healing power.
 std::span<EnchantWish const> WishesFor(Role role, bool agility_hands, std::uint8_t school);
 
+// How far a bot's gear is, which decides the enchants it wears (a bot in greens does not walk around with Naxxramas enchants).
+//   Cheap     average equipped item level below kStandardEnchantIlvl (greens, levelling blues): the cheap trade enchants only
+//             (bracer, gloves, boots, cloak, shield and chest stats); no weapon, head, leg or shoulder enchant.
+//   Standard  pre-raid best in slot, Molten Core and Blackwing Lair gear: the vanilla raider's enchants (Crusader, the Zul'Gurub and
+//             Dire Maul head and leg enchants, Zandalar signets, the greater trade enchants).
+//   Naxx      from kNaxxEnchantIlvl (Ahn'Qiraj / tier 2.5 gear and above): the Naxxramas shoulder enchants (... of the Scourge) too.
+enum class EnchantTier : std::uint8_t { Cheap, Standard, Naxx };
+constexpr std::uint32_t kStandardEnchantIlvl = 60;   // a level-60 bot mostly in dungeon blues / pre-raid pieces
+constexpr std::uint32_t kNaxxEnchantIlvl     = 86;   // mostly Ahn'Qiraj 40 (88, tier 2.5) or better; Blackwing Lair is 83
+EnchantTier TierForAverageItemLevel(std::uint32_t avg_ilvl);
+// The tier an enchant (a candidate name of a wish) belongs to, and whether a bot of `tier` may wear it.
+EnchantTier TierOfEnchant(std::string_view name);
+inline bool EnchantAllowed(std::string_view name, EnchantTier tier) { return TierOfEnchant(name) <= tier; }
+
 // The first candidate of `names` for which `has(name)` is true; empty when none.
 template <typename Has>
 std::string_view FirstKnown(std::string_view names, Has has)
