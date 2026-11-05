@@ -1957,7 +1957,8 @@ void Guild::HandleRemoveRank(WorldSession* session, GuildRankOrder rankOrder)
         return rank.GetOrder() == rankOrder;
     });
 
-    if (rankItr == m_ranks.end())
+    // the guild master rank can never go (Validate would rebuild every rank at the next start)
+    if (rankItr == m_ranks.end() || rankItr->GetId() == GuildRankId::GuildMaster)
         return;
 
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
@@ -2674,12 +2675,20 @@ bool Guild::Validate()
     }
     else
     {
-        for (uint8 rankId = 0; rankId < ranks; ++rankId)
+        // A deleted rank leaves a gap in the rank ids (0, 1, 3) while the orders are closed up again (0, 1, 2), so the
+        // sequence check goes by order. Looking the ranks up by id found no rank for the gap and crashed the server at start.
+        if (!GetRankInfo(GuildRankId::GuildMaster))
         {
-            RankInfo* rankInfo = GetRankInfo(GuildRankId(rankId));
-            if (rankInfo->GetId() != GuildRankId(rankId))
+            TC_LOG_ERROR("guild", "Guild {} has no guild master rank, creating default set of ranks...", m_id);
+            broken_ranks = true;
+        }
+
+        for (uint8 rankOrder = 0; rankOrder < ranks && !broken_ranks; ++rankOrder)
+        {
+            RankInfo* rankInfo = GetRankInfo(GuildRankOrder(rankOrder));
+            if (!rankInfo)
             {
-                TC_LOG_ERROR("guild", "Guild {} has broken rank id {}, creating default set of ranks...", m_id, rankId);
+                TC_LOG_ERROR("guild", "Guild {} has no rank with order {}, creating default set of ranks...", m_id, rankOrder);
                 broken_ranks = true;
             }
             else

@@ -16,8 +16,10 @@
  */
 
 #include "DB2Stores.h"
+#include "ByteBuffer.h"
 #include "ClassicOpcodes.h"
 #include "Containers.h"
+#include "DB2LegacyLayout.h"
 #include "DB2LoadInfo.h"
 #include "DatabaseEnv.h"
 #include "Hash.h"
@@ -677,6 +679,9 @@ uint32 DB2Manager::LoadStores(std::string const& dataPath, LocaleConstant defaul
 
     if (!availableDb2Locales[defaultLocale])
         return 0;
+
+    // game tables extracted from a client up to 70685 have the old SpellDuration layout: rewrite them into the 70707 layout the server reads
+    DB2LegacyLayout::UpgradeLegacyDB2Files(db2Path);
 
     auto LOAD_DB2 = [&]<typename T>(DB2Storage<T>& store)
     {
@@ -1346,6 +1351,16 @@ void DB2Manager::IndexLoadedStores()
         for (auto& [curveId, curvePoints] : unsortedPoints)
         {
             std::ranges::sort(curvePoints, {}, &CurvePointEntry::OrderIndex);
+
+            // Classic 1.60 (70707): the TransmogCost curve 106855 has a leftover point (60, 1) at OrderIndex 2, between (2, 50)
+            // and (3, 50). Evaluated in OrderIndex order every level from 3 to 59 interpolates towards it, so the outfit price
+            // the server works out is far below the one the client shows and every outfit save is refused. Interpolated
+            // curves are looked up by X, so put their points in X order (OrderIndex still decides between equal X).
+            // Bezier curves (type 2) use their points as control points in OrderIndex order and are left alone.
+            if (sCurveStore.AssertEntry(curveId)->Type != 2
+                && !std::ranges::is_sorted(curvePoints, {}, [](CurvePointEntry const* point) { return point->Pos.X; }))
+                std::ranges::stable_sort(curvePoints, {}, [](CurvePointEntry const* point) { return point->Pos.X; });
+
             std::vector<DBCPosition2D>& points = _curvePoints[curveId];
             points.resize(curvePoints.size());
             std::ranges::transform(curvePoints, points.begin(), &CurvePointEntry::Pos);
@@ -1818,6 +1833,27 @@ void DB2Manager::LoadHotfixData(uint32 localeMask)
         hotfixRecord.RecordID = recordId;
         hotfixRecord.ID.PushID = id;
         hotfixRecord.ID.UniqueID = uniqueId;
+        // the client keeps a hotfix it has cached under the same push and unique id, so a record whose content changed
+        // (an item name that used to go out empty in ruRU) never reached it: mix the content into the unique id
+        if (status == HotfixRecord::Status::Valid)
+        {
+            auto storeItr = _stores.find(tableHash);
+            if (storeItr != _stores.end() && storeItr->second->HasRecord(uint32(recordId)))
+            {
+                Trinity::HashFnv1a<uint32> contentHash;
+                contentHash.UpdateData(uniqueId);
+                for (std::size_t locale = 0; locale < TOTAL_LOCALES; ++locale)
+                {
+                    if (!availableDb2Locales[locale])
+                        continue;
+
+                    ByteBuffer content;
+                    storeItr->second->WriteRecord(uint32(recordId), LocaleConstant(locale), content);
+                    contentHash.UpdateData(std::span<uint8 const>(content.data(), content.size()));
+                }
+                hotfixRecord.ID.UniqueID = contentHash.Value;
+            }
+        }
         hotfixRecord.HotfixStatus = status;
         hotfixRecord.AvailableLocalesMask = availableDb2Locales.to_ulong();
 

@@ -3444,9 +3444,15 @@ void SpellMgr::LoadClassicSpellInfo()
                 spellInfo.CastTimeEntry = &row;
             }
             if (!fields[2].IsNull())
+            {
+                spellInfo.ClassicCooldownOverridden |= spellInfo.RecoveryTime != fields[2].GetUInt32();
                 spellInfo.RecoveryTime = fields[2].GetUInt32();
+            }
             if (!fields[3].IsNull())
+            {
+                spellInfo.ClassicCooldownOverridden |= spellInfo.CategoryRecoveryTime != fields[3].GetUInt32();
                 spellInfo.CategoryRecoveryTime = fields[3].GetUInt32();
+            }
             if (!fields[4].IsNull())
             {
                 SpellDurationEntry& row = mClassicDurations.emplace_back();
@@ -3469,6 +3475,95 @@ void SpellMgr::LoadClassicSpellInfo()
     } while (result->NextRow());
 
     TC_LOG_INFO("server.loading", ">> Loaded {} classic spell infos in {} ms", count, GetMSTimeDiffToNow(oldMSTime));
+}
+
+// Classic 1.60: a Forever twin of a channeled vanilla spell (Drain Life 403677-403689 is an instant 15 s aura in the client data, vanilla Drain Life is a
+// 5 s channel that ends when the warlock moves) is a channel too: it takes the channel attributes and the channel interrupt flags of the vanilla spell, the
+// duration comes from classic_spell_info. A twin that is already channeled, or whose vanilla spell is not, is left alone.
+void SpellMgr::LoadClassicTwinChannels()
+{
+    uint32 oldMSTime = getMSTime();
+
+    QueryResult result = WorldDatabase.Query("SELECT spell_id, vanilla_spell_id FROM classic_spell_twin");
+    if (!result)
+    {
+        TC_LOG_INFO("server.loading", ">> Loaded 0 classic twin channels. DB table `classic_spell_twin` is empty.");
+        return;
+    }
+
+    uint32 count = 0;
+    do
+    {
+        Field* fields = result->Fetch();
+        uint32 const twinId = fields[0].GetUInt32();
+        uint32 const vanillaId = fields[1].GetUInt32();
+
+        SpellInfo const* vanilla = GetSpellInfo(vanillaId, DIFFICULTY_NONE);
+        if (!vanilla || !vanilla->IsChanneled())
+            continue;
+
+        auto range = _GetSpellInfo(twinId);
+        for (SpellInfo const& constInfo : range)
+        {
+            SpellInfo& twin = const_cast<SpellInfo&>(constInfo);
+            if (twin.IsChanneled())
+                continue;
+
+            twin.AttributesEx |= vanilla->AttributesEx & (SPELL_ATTR1_IS_CHANNELLED | SPELL_ATTR1_IS_SELF_CHANNELLED);
+            twin.ChannelInterruptFlags = vanilla->ChannelInterruptFlags;
+            twin.ChannelInterruptFlags2 = vanilla->ChannelInterruptFlags2;
+            ++count;
+        }
+    } while (result->NextRow());
+
+    TC_LOG_INFO("server.loading", ">> Loaded {} classic twin channels in {} ms", count, GetMSTimeDiffToNow(oldMSTime));
+}
+
+// Classic 1.60: effects the client reworked into another aura or modifier operation, or whose school mask / class mask is not the vanilla one (table
+// classic_spell_effect, written by tools/classic_spell_values/gen_spell_effects.py or by hand): the aura, the misc value and, when it is not all zero, the class mask
+// replace the client's, so the vanilla value (classic_spell_value) can be taken across. Runs before LoadClassicSpellValues, which matches on them.
+void SpellMgr::LoadClassicSpellEffects()
+{
+    uint32 oldMSTime = getMSTime();
+
+    //                                               0         1             2           3           4           5           6           7
+    QueryResult result = WorldDatabase.Query("SELECT spell_id, effect_index, apply_aura, misc_value, class_mask0, class_mask1, class_mask2, class_mask3 FROM classic_spell_effect");
+    if (!result)
+    {
+        TC_LOG_INFO("server.loading", ">> Loaded 0 classic spell effects. DB table `classic_spell_effect` is empty.");
+        return;
+    }
+
+    uint32 count = 0;
+    do
+    {
+        Field* fields = result->Fetch();
+        uint32 const spellId = fields[0].GetUInt32();
+        uint8 const effectIndex = fields[1].GetUInt8();
+
+        auto range = _GetSpellInfo(spellId);
+        if (range.begin() == range.end())
+            continue;   // a vanilla spell this client does not have
+
+        flag128 const mask(fields[4].GetUInt32(), fields[5].GetUInt32(), fields[6].GetUInt32(), fields[7].GetUInt32());
+        for (SpellInfo const& constInfo : range)
+        {
+            if (constInfo.GetEffects().size() <= effectIndex)
+            {
+                TC_LOG_ERROR("server.loading", "classic_spell_effect: spell {} has no effect {}", spellId, uint32(effectIndex));
+                continue;
+            }
+
+            SpellEffectInfo& effect = const_cast<SpellEffectInfo&>(constInfo.GetEffect(SpellEffIndex(effectIndex)));
+            effect.ApplyAuraName = AuraType(fields[2].GetUInt16());
+            effect.MiscValue = fields[3].GetInt32();
+            if (mask)
+                effect.SpellClassMask = mask;
+            ++count;
+        }
+    } while (result->NextRow());
+
+    TC_LOG_INFO("server.loading", ">> Loaded {} classic spell effects in {} ms", count, GetMSTimeDiffToNow(oldMSTime));
 }
 
 void SpellMgr::LoadClassicSpellValues()
@@ -3628,6 +3723,14 @@ void SpellMgr::LoadSpellInfoCorrections()
             });
         });
     }
+
+    // Classic 1.60 warrior Deep Wounds: the bleed tick (412613) never misses, never crits and ignores armor
+    ApplySpellFix({ 412613 }, [](SpellInfo* spellInfo)
+    {
+        spellInfo->AttributesEx2 |= SPELL_ATTR2_CANT_CRIT;
+        spellInfo->AttributesEx3 |= SPELL_ATTR3_ALWAYS_HIT;
+        spellInfo->AttributesCu |= SPELL_ATTR0_CU_IGNORE_ARMOR;
+    });
 
     // specific code for cases with no trigger spell provided in field
     {
@@ -3919,6 +4022,18 @@ void SpellMgr::LoadSpellInfoCorrections()
         ApplySpellEffectFix(spellInfo, EFFECT_2, [](SpellEffectInfo* spellEffectInfo)
         {
             spellEffectInfo->BasePoints += 30000;
+        });
+    });
+
+    // Classic 1.60: Spirit of Redemption talent (20711). The client spell is a dummy aura; vMaNGOS (Unit::DealDamage) checks the aura on a
+    // lethal hit and casts 27827. The retail overkill absorb is the same hook here: the aura becomes an absorb of all schools without a
+    // limit, which spell_pri_spirit_of_redemption (bound to 20711) answers with 27827
+    ApplySpellFix({ 20711 }, [](SpellInfo* spellInfo)
+    {
+        ApplySpellEffectFix(spellInfo, EFFECT_0, [](SpellEffectInfo* spellEffectInfo)
+        {
+            spellEffectInfo->ApplyAuraName = SPELL_AURA_SCHOOL_ABSORB_OVERKILL;
+            spellEffectInfo->MiscValue = SPELL_SCHOOL_MASK_ALL;
         });
     });
 
@@ -5722,6 +5837,17 @@ void SpellMgr::LoadSpellInfoTargetCaps()
     ApplySpellFix({ 435222 }, [](SpellInfo* spellInfo)
     {
         spellInfo->_LoadSqrtTargetLimit(5, 0, {}, EFFECT_4, {}, {});
+    });
+
+    // Revealed Flaw (Bonescythe Armor, 8 pieces): the client effect is an add-target-trigger without a class mask or a chance, which put the +100 crit
+    // aura 28815 on the rogue after every spell it cast. A proc trigger on Eviscerate (spell_proc 28814, classic_spell_rog_revealed_flaw rolls the chance).
+    ApplySpellFix({ 28814 }, [](SpellInfo* spellInfo)
+    {
+        ApplySpellEffectFix(spellInfo, EFFECT_0, [](SpellEffectInfo* spellEffectInfo)
+        {
+            spellEffectInfo->ApplyAuraName = SPELL_AURA_PROC_TRIGGER_SPELL;
+        });
+        spellInfo->ProcChance = 100;
     });
 
     // Rampaging Ruin

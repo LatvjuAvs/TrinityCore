@@ -24,6 +24,7 @@
 #include "PacketOperators.h"
 #include "Player.h"
 #include "RealmList.h"
+#include "Util.h"
 #include "World.h"
 
 namespace UF
@@ -131,7 +132,9 @@ EnumCharactersResult::CharacterInfoBasic::CharacterInfoBasic(Field const* fields
     if (fields[17].GetUInt64())
         Flags |= CHARACTER_FLAG_LOCKED_BY_BILLING;
 
-    if (sWorld->getBoolConfig(CONFIG_DECLINED_NAMES_USED) && !fields[180].GetStringView().empty())
+    // Classic 1.60: the ruRU client asks for the declensions of a Cyrillic name at every login until this flag is set; a realm without
+    // declined names has nothing to ask for
+    if (!sWorld->getBoolConfig(CONFIG_DECLINED_NAMES_USED) || !fields[180].GetStringView().empty())
         Flags |= CHARACTER_FLAG_DECLINED;
 
     if (atLoginFlags & AT_LOGIN_CUSTOMIZE)
@@ -925,11 +928,24 @@ void SetPlayerDeclinedNames::Read()
 {
     _worldPacket >> Player;
 
-    for (uint8 i = 0; i < MAX_DECLINED_NAME_CASES; ++i)
-        _worldPacket >> SizedString::BitsSize<7>(DeclinedNames.name[i]);
+    try
+    {
+        for (uint8 i = 0; i < MAX_DECLINED_NAME_CASES; ++i)
+            _worldPacket >> SizedString::BitsSize<7>(DeclinedNames.name[i]);
 
-    for (uint8 i = 0; i < MAX_DECLINED_NAME_CASES; ++i)
-        _worldPacket >> SizedString::Data(DeclinedNames.name[i]);
+        for (uint8 i = 0; i < MAX_DECLINED_NAME_CASES; ++i)
+            _worldPacket >> SizedString::Data(DeclinedNames.name[i]);
+
+        // the 1.60 layout with the surname can also read without running out of data, leaving the surname bytes behind
+        Parsed = _worldPacket.rpos() == _worldPacket.size();
+    }
+    catch (ByteBufferException const&)
+    {
+        Parsed = false;
+    }
+
+    if (!Parsed)
+        RawHex = Trinity::Impl::ByteArrayToHexStr(_worldPacket.data(), std::min<size_t>(_worldPacket.size(), 600));
 }
 
 WorldPacket const * SetPlayerDeclinedNamesResult::Write()

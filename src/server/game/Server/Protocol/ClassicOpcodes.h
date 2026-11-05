@@ -25,11 +25,13 @@
 /// Entries are added as they are discovered; opcodes without an entry are passed through unchanged.
 namespace ClassicOpcodes
 {
-    /// client number -> core OpcodeClient value
-    TC_GAME_API uint32 TranslateClientOpcode(uint32 classicOpcode);
+    /// client number -> core OpcodeClient value. clientBuild = the build this connection's client logged in with (0 = not known yet):
+    /// builds from Classic.Build70755.FirstBuild on also get that build's moved message numbers (see Classic.Build70755.*), and
+    /// builds from Classic.Build70790.FirstBuild on also those of 70790 (Classic.Build70790.*)
+    TC_GAME_API uint32 TranslateClientOpcode(uint32 classicOpcode, uint32 clientBuild = 0);
 
-    /// core OpcodeServer value -> client number
-    TC_GAME_API uint32 TranslateServerOpcode(uint32 coreOpcode);
+    /// core OpcodeServer value -> client number, for a client of build clientBuild (0 = not known yet)
+    TC_GAME_API uint32 TranslateServerOpcode(uint32 coreOpcode, uint32 clientBuild = 0);
 
     /// the same in the numbering of client 70245 (the tables); the two above add the newer builds' group shift
     TC_GAME_API uint32 TranslateClientOpcode70245(uint32 classicOpcode);

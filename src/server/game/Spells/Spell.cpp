@@ -24,6 +24,7 @@
 #include "BattlePetMgr.h"
 #include "CellImpl.h"
 #include "CharmInfo.h"
+#include "ClassicAutoShot.h"
 #include "ClassicOpcodes.h"
 #include "CollectionMgr.h"
 #include "CombatLogPackets.h"
@@ -64,6 +65,8 @@
 #include "TradeData.h"
 #include "TraitPackets.h"
 #include "TransmogMgr.h"
+#include <mutex>
+#include <unordered_set>
 #include "UniqueTrackablePtr.h"
 #include "Util.h"
 #include "VMapFactory.h"
@@ -514,14 +517,7 @@ m_spellValue(new SpellValue(m_spellInfo, caster)), _spellEvent(nullptr)
     else
         m_originalCasterGUID = m_caster->GetGUID();
 
-    if (m_originalCasterGUID == m_caster->GetGUID())
-        m_originalCaster = m_caster->ToUnit();
-    else
-    {
-        m_originalCaster = ObjectAccessor::GetUnit(*m_caster, m_originalCasterGUID);
-        if (m_originalCaster && !m_originalCaster->IsInWorld())
-            m_originalCaster = nullptr;
-    }
+    UpdateOriginalCasterPointer();
 
     m_spellState = SPELL_STATE_NULL;
     _triggeredCastFlags = triggerFlags;
@@ -769,7 +765,7 @@ void Spell::SelectSpellTargets()
                             case TARGET_SELECT_CATEGORY_NEARBY:
                             case TARGET_SELECT_CATEGORY_CONE:
                             case TARGET_SELECT_CATEGORY_AREA:
-                            case TARGET_SELECT_CATEGORY_LINE:
+                            case TARGET_SELECT_CATEGORY_RECT:
                                 return true;
                             default:
                                 break;
@@ -975,7 +971,7 @@ void Spell::SelectEffectImplicitTargets(SpellEffectInfo const& spellEffectInfo, 
 
             SelectImplicitTrajTargets(spellEffectInfo, targetType);
             break;
-        case TARGET_SELECT_CATEGORY_LINE:
+        case TARGET_SELECT_CATEGORY_RECT:
             SelectImplicitLineTargets(spellEffectInfo, targetType, targetIndex, effectMask);
             break;
         case TARGET_SELECT_CATEGORY_DEFAULT:
@@ -1975,6 +1971,7 @@ void Spell::SelectImplicitLineTargets(SpellEffectInfo const& spellEffectInfo, Sp
     SpellTargetObjectTypes objectType = targetType.GetObjectType();
     SpellTargetCheckTypes selectionType = targetType.GetCheckType();
     Position const* dst = nullptr;
+    SpellRange radius = spellEffectInfo.CalcRadius(m_caster, targetIndex) * m_spellValue->RadiusMod;
     switch (targetType.GetReferenceType())
     {
         case TARGET_REFERENCE_TYPE_SRC:
@@ -1982,6 +1979,7 @@ void Spell::SelectImplicitLineTargets(SpellEffectInfo const& spellEffectInfo, Sp
             break;
         case TARGET_REFERENCE_TYPE_DEST:
             dst = m_targets.GetDstPos();
+            radius.Max = std::min(radius.Max, m_caster->GetExactDist2d(dst));
             break;
         case TARGET_REFERENCE_TYPE_CASTER:
             dst = m_caster;
@@ -1995,11 +1993,10 @@ void Spell::SelectImplicitLineTargets(SpellEffectInfo const& spellEffectInfo, Sp
     }
 
     ConditionContainer* condList = spellEffectInfo.ImplicitTargetConditions.get();
-    SpellRange radius = spellEffectInfo.CalcRadius(m_caster, targetIndex) * m_spellValue->RadiusMod;
 
     if (uint32 containerTypeMask = GetSearcherTypeMask(m_spellInfo, spellEffectInfo, objectType, condList))
     {
-        Trinity::WorldObjectSpellLineTargetCheck check(m_caster, dst, m_spellInfo->Width ? m_spellInfo->Width : m_caster->GetCombatReach(), radius, m_caster, m_spellInfo, selectionType, condList, objectType);
+        Trinity::WorldObjectSpellLineTargetCheck check(m_caster, dst, m_spellInfo->Width ? m_spellInfo->Width / 2.0f : m_caster->GetCombatReach(), radius, m_caster, m_spellInfo, selectionType, condList, objectType);
         Trinity::WorldObjectListSearcher<Trinity::WorldObjectSpellLineTargetCheck> searcher(m_caster, targets, check, containerTypeMask);
         SearchTargets<Trinity::WorldObjectListSearcher<Trinity::WorldObjectSpellLineTargetCheck>>(searcher, containerTypeMask, m_caster, m_caster, radius.Max);
 
@@ -2972,6 +2969,8 @@ void Spell::TargetInfo::DoDamageAndTriggers(Spell* spell)
                 }
                 spell->m_damage = damageInfo.damage;
 
+                sScriptMgr->OnHitOutcome(caster, spell->unitTarget, spell->m_spellInfo->Id,
+                    IsCrit ? HIT_OUTCOME_CRIT : MissCondition == SPELL_MISS_BLOCK ? HIT_OUTCOME_BLOCK : HIT_OUTCOME_HIT, damageInfo.damage);
                 caster->DealSpellDamage(&damageInfo, true);
 
                 // Send log damage message to client
@@ -2992,6 +2991,11 @@ void Spell::TargetInfo::DoDamageAndTriggers(Spell* spell)
             // Fill base damage struct (unitTarget - is real spell target)
             SpellNonMeleeDamage damageInfo(caster, spell->unitTarget, spell->m_spellInfo, spell->m_SpellVisual, spell->m_spellSchoolMask);
             ProcHitMask |= createProcHitMask(&damageInfo, MissCondition);
+            // A hostile spell that missed, was dodged, parried or resisted
+            if (MissCondition == SPELL_MISS_MISS || MissCondition == SPELL_MISS_DODGE || MissCondition == SPELL_MISS_PARRY || MissCondition == SPELL_MISS_RESIST)
+                sScriptMgr->OnHitOutcome(caster, spell->unitTarget, spell->m_spellInfo->Id,
+                    MissCondition == SPELL_MISS_MISS ? HIT_OUTCOME_MISS : MissCondition == SPELL_MISS_DODGE ? HIT_OUTCOME_DODGE
+                    : MissCondition == SPELL_MISS_PARRY ? HIT_OUTCOME_PARRY : HIT_OUTCOME_RESIST, 0);
             // Do triggers for unit
             if (canEffectTrigger)
             {
@@ -3695,6 +3699,9 @@ void Spell::cancel(SpellCastResult result /*= SPELL_FAILED_INTERRUPTED*/, Option
     SetReferencedFromCurrent(false);
     if (m_selfContainer && *m_selfContainer == this)
         *m_selfContainer = nullptr;
+
+    // update original caster pointer to prevent access to non-existed already object (grid unload)
+    UpdateOriginalCasterPointer();
 
     // originalcaster handles gameobjects/dynobjects for gob caster
     if (m_originalCaster)
@@ -4913,6 +4920,23 @@ void Spell::SendSpellGo()
         castData.MissileTrajectory.Pitch = m_targets.GetPitch();
     }
 
+    // The missile is launched by this packet: without the ammo display the client draws it as a white box. Shots whose cast start is
+    // never sent (Auto Shot's repeats, other triggered ranged spells) were left with display 0 (PC 20 Oct, squares on some of a hunter's moves).
+    if (castFlags & CAST_FLAG_PROJECTILE)
+    {
+        castData.AmmoDisplayID = GetSpellCastDataAmmo();
+        static std::mutex missileLogMutex;
+        static std::unordered_set<uint32> missileLogged;
+        bool first;
+        {
+            std::lock_guard<std::mutex> lock(missileLogMutex);
+            first = m_caster->IsPlayer() && missileLogged.insert(m_spellInfo->Id).second;
+        }
+        if (first)
+            TC_LOG_INFO("playerbot.v2", "[missile] spell {} visual {} ammo display {} cast flags 0x{:X} triggered 0x{:X}", m_spellInfo->Id,
+                m_SpellVisual.SpellXSpellVisualID, castData.AmmoDisplayID, castFlags, uint32(_triggeredCastFlags));
+    }
+
     packet.LogData.Initialize(this);
 
     m_caster->SendCombatLogMessage(&packet);
@@ -4977,12 +5001,20 @@ int32 Spell::GetSpellCastDataAmmo()
         {
             ammoInventoryType = pItem->GetTemplate()->GetInventoryType();
             if (ammoInventoryType == INVTYPE_THROWN)
+            {
                 ammoDisplayID = pItem->GetDisplayId(playerCaster);
+                // A thrown weapon with the generic 1.60 display, or none, is drawn by the client as a white square (UBRS and Red Cloud Mesa, 20 Oct).
+                if (!ammoDisplayID || ammoDisplayID >= 500000)
+                    ammoDisplayID = 23211;
+            }
             else if (ItemTemplate const* ammo = sObjectMgr->GetItemTemplate(playerCaster->GetAmmoId()))   // Classic 1.60 ammo slot
             {
-                if (ItemModifiedAppearanceEntry const* modifiedAppearance = TransmogMgr::GetItemModifiedAppearance(ammo->GetId(), 0))
-                    if (ItemAppearanceEntry const* itemAppearance = sItemAppearanceStore.LookupEntry(modifiedAppearance->ItemAppearanceID))
-                        ammoDisplayID = itemAppearance->ItemDisplayInfoID;
+                // The ammo's own display, as a real player's cast sends it. The generic 1.60 ammo display (737992 / 737993) has no model and the
+                // client draws a white box for it (PC log 20 Oct); bots take ammo that has its own display (Player::AutoSelectAmmo), so
+                // this is the fallback only: an arrow model, for bullets too (every classic bullet has the generic display).
+                ammoDisplayID = Player::GetAmmoDisplayId(ammo);
+                if (!Player::HasDrawableAmmoDisplay(ammo))
+                    ammoDisplayID = 23211;   // an arrow display seen to draw (item 19082); no classic bullet has a display of its own
                 ammoInventoryType = INVTYPE_AMMO;
             }
             else if (playerCaster->HasAura(46699))      // Requires No Ammo
@@ -5909,6 +5941,10 @@ SpellCastResult Spell::CheckCast(bool strict, int32* param1 /*= nullptr*/, int32
             }
 
             if ((IsAutoRepeat() || m_spellInfo->CategoryId == 76) && !m_caster->ToUnit()->isAttackReady(RANGED_ATTACK))
+                return SPELL_FAILED_DONT_REPORT;
+
+            // Classic 1.60: Auto Shot waits for its half-second wind-up like it waits for the swing timer (queued, shot on a later update)
+            if (m_spellInfo->Id == ClassicAutoShot::SpellId && !m_caster->ToUnit()->IsClassicAutoShotWindupDone())
                 return SPELL_FAILED_DONT_REPORT;
         }
     }
@@ -7506,20 +7542,25 @@ bool Spell::CanIncreaseRangeByMovement(Unit const* unit)
 
 SpellRange Spell::GetMinMaxRange(bool strict) const
 {
+    return CalcMinMaxRange(m_caster, m_targets.GetUnitTarget(), m_targets.GetCorpseTarget() != nullptr, m_spellInfo, strict, const_cast<Spell*>(this));
+}
+
+// The numbers CheckRange tests, available before any Spell exists (a bot picks its standing spot from the same minimum the cast will be held to)
+SpellRange Spell::CalcMinMaxRange(WorldObject const* caster, Unit const* target, bool corpseTarget, SpellInfo const* spellInfo, bool strict, Spell* spell /*= nullptr*/)
+{
     float rangeMod = 0.0f;
     SpellRange range;
 
-    if (strict && m_spellInfo->IsNextMeleeSwingSpell())
+    if (strict && spellInfo->IsNextMeleeSwingSpell())
     {
         range = { .Min = 0.0f, .Max = 100.0f };
         return range;
     }
 
-    Unit* unitCaster = m_caster->ToUnit();
-    if (m_spellInfo->RangeEntry)
+    Unit const* unitCaster = caster->ToUnit();
+    if (spellInfo->RangeEntry)
     {
-        Unit* target = m_targets.GetUnitTarget();
-        if (m_spellInfo->RangeEntry->Flags & SPELL_RANGE_MELEE)
+        if (spellInfo->RangeEntry->Flags & SPELL_RANGE_MELEE)
         {
             // when the target is not a unit, take the caster's combat reach as the target's combat reach.
             if (unitCaster)
@@ -7528,36 +7569,36 @@ SpellRange Spell::GetMinMaxRange(bool strict) const
         else
         {
             float meleeRange = 0.0f;
-            if (m_spellInfo->RangeEntry->Flags & SPELL_RANGE_RANGED)
+            if (spellInfo->RangeEntry->Flags & SPELL_RANGE_RANGED)
             {
                 // when the target is not a unit, take the caster's combat reach as the target's combat reach.
                 if (unitCaster)
                     meleeRange = unitCaster->GetMeleeRange(target ? target : unitCaster);
             }
 
-            range = m_caster->GetSpellMinMaxRangeForTarget(target, m_spellInfo);
+            range = caster->GetSpellMinMaxRangeForTarget(target, spellInfo);
             range.Min += meleeRange;
 
-            if (target || m_targets.GetCorpseTarget())
+            if (target || corpseTarget)
             {
-                rangeMod = m_caster->GetCombatReach() + (target ? target->GetCombatReach() : m_caster->GetCombatReach());
+                rangeMod = caster->GetCombatReach() + (target ? target->GetCombatReach() : caster->GetCombatReach());
 
-                if (range.Min > 0.0f && !(m_spellInfo->RangeEntry->Flags & SPELL_RANGE_RANGED))
+                if (range.Min > 0.0f && !(spellInfo->RangeEntry->Flags & SPELL_RANGE_RANGED))
                     range.Min += rangeMod;
             }
         }
 
         if (target && unitCaster && CanIncreaseRangeByMovement(target) && CanIncreaseRangeByMovement(unitCaster) &&
-            ((m_spellInfo->RangeEntry->Flags & SPELL_RANGE_MELEE) || target->GetTypeId() == TYPEID_PLAYER))
+            ((spellInfo->RangeEntry->Flags & SPELL_RANGE_MELEE) || target->GetTypeId() == TYPEID_PLAYER))
             rangeMod += 8.0f / 3.0f;
     }
 
-    if (m_spellInfo->HasAttribute(SPELL_ATTR0_USES_RANGED_SLOT) && m_caster->GetTypeId() == TYPEID_PLAYER)
-        if (Item* ranged = m_caster->ToPlayer()->GetWeaponForAttack(RANGED_ATTACK, true))
+    if (spellInfo->HasAttribute(SPELL_ATTR0_USES_RANGED_SLOT) && caster->GetTypeId() == TYPEID_PLAYER)
+        if (Item* ranged = caster->ToPlayer()->GetWeaponForAttack(RANGED_ATTACK, true))
             range.Max *= ranged->GetTemplate()->GetRangedModRange() * 0.01f;
 
-    if (Player* modOwner = m_caster->GetSpellModOwner())
-        modOwner->ApplySpellMod(m_spellInfo, SpellModOp::Range, range.Max, const_cast<Spell*>(this));
+    if (Player* modOwner = caster->GetSpellModOwner())
+        modOwner->ApplySpellMod(spellInfo, SpellModOp::Range, range.Max, spell);
 
     range.Max += rangeMod;
 
@@ -8283,7 +8324,7 @@ Optional<int32> Spell::GetPowerTypeCostAmount(Powers power) const
     return itr->Amount;
 }
 
-bool Spell::UpdatePointers()
+void Spell::UpdateOriginalCasterPointer()
 {
     if (m_originalCasterGUID == m_caster->GetGUID())
         m_originalCaster = m_caster->ToUnit();
@@ -8293,6 +8334,11 @@ bool Spell::UpdatePointers()
         if (m_originalCaster && !m_originalCaster->IsInWorld())
             m_originalCaster = nullptr;
     }
+}
+
+bool Spell::UpdatePointers()
+{
+    UpdateOriginalCasterPointer();
 
     if (!m_focusObjectGUID.IsEmpty())
         focusObject = ObjectAccessor::GetGameObject(*m_caster, m_focusObjectGUID);
@@ -8748,7 +8794,27 @@ void Spell::PreprocessSpellLaunch(TargetInfo& targetInfo)
     {
         if (!critChance)
             critChance = m_originalCaster->SpellCritChanceDone(this, nullptr, m_spellSchoolMask, m_attackType);
+        float const critDone = critChance;
         critChance = unit->SpellCritChanceTaken(m_originalCaster, this, nullptr, m_spellSchoolMask, critChance, m_attackType);
+        // A player's ability that crits at least half the time: name what gives the chance, once per spell (damage_parity 146: Sinister
+        // Strike and Backstab crit 97-100 % of landed hits while white swings crit 24 %).
+        if (critChance >= 50.0f && m_originalCaster->GetTypeId() == TYPEID_PLAYER)
+        {
+            static std::mutex certainCritMutex;
+            static std::unordered_set<uint32> certainCritLogged;
+            std::lock_guard<std::mutex> lock(certainCritMutex);
+            if (certainCritLogged.insert(m_spellInfo->Id).second)
+            {
+                std::string mods;
+                for (AuraType type : { SPELL_AURA_ADD_FLAT_MODIFIER, SPELL_AURA_ADD_PCT_MODIFIER, SPELL_AURA_ADD_FLAT_MODIFIER_BY_SPELL_LABEL, SPELL_AURA_ADD_PCT_MODIFIER_BY_SPELL_LABEL })
+                    for (AuraEffect const* eff : m_originalCaster->GetAuraEffectsByType(type))
+                        if (eff->GetMiscValue() == int32(SpellModOp::CritChance) && eff->IsAffectingSpell(m_spellInfo))
+                            mods += fmt::format(" {}({}) type {}: {}", eff->GetId(), eff->GetSpellInfo()->SpellName ? (*eff->GetSpellInfo()->SpellName)[sWorld->GetDefaultDbcLocale()] : "", int(type), eff->GetAmount());
+                TC_LOG_INFO("playerbot.v2", "[certain_crit] spell {} ({}) crit chance {:.1f}% (before the target's auras {:.1f}%, character sheet {:.1f}%, spell value {:.1f}%) spell mods:{}", m_spellInfo->Id,
+                    m_spellInfo->SpellName ? (*m_spellInfo->SpellName)[sWorld->GetDefaultDbcLocale()] : "", critChance, critDone,
+                    m_originalCaster->GetUnitCriticalChanceDone(m_attackType), m_spellValue->CriticalChance, mods.empty() ? " none" : mods);
+            }
+        }
     }
 
     targetInfo.IsCrit = roll_chance(critChance);
@@ -9694,7 +9760,7 @@ bool WorldObjectSpellLineTargetCheck::operator()(WorldObject* target) const
     if (!_position.HasInLine(target, target->GetCombatReach(), _lineWidth))
         return false;
 
-    return WorldObjectSpellTargetCheck::operator ()(target);
+    return WorldObjectSpellAreaTargetCheck::operator ()(target);
 }
 
 void SelectRandomInjuredTargets(std::list<WorldObject*>& targets, size_t maxTargets, bool prioritizePlayers, Unit const* prioritizeGroupMembersOf /*= nullptr*/)

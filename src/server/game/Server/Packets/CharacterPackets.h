@@ -884,6 +884,8 @@ namespace WorldPackets
 
             ObjectGuid Player;
             DeclinedName DeclinedNames;
+            bool Parsed = true;     // false when the layout could not be read (Classic 1.60 ruRU, which also declines the surname)
+            std::string RawHex;     // start of such a packet, logged to learn its layout
         };
 
         class SetPlayerDeclinedNamesResult final : public ServerPacket

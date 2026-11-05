@@ -232,11 +232,15 @@ enum BattlegroundPlayerPositionConstants
 
 enum class BattlegroundQueueIdType : uint8
 {
-    Battleground    = 0,
-    Arena           = 1,
-    Wargame         = 2,
-    Cheat           = 3,
-    ArenaSkirmish   = 4
+    Battleground        = 0,
+    Arena               = 1,
+    Wargame             = 2,
+    Cheat               = 3,
+    ArenaSkirmish       = 4,
+    SoloShuffle         = 6,
+    RatedSoloShuffle    = 7,
+    SoloRBG             = 8,
+    RatedSoloRBG        = 9
 };
 
 enum class BattlegroundPointCaptureStatus
@@ -271,6 +275,7 @@ class TC_GAME_API Battleground
         /* Battleground */
         // Get methods:
         char const* GetName() const;
+        BattlegroundQueueTypeId GetQueueID() const { return m_QueueID; }
         BattlegroundTypeId GetTypeID() const;
         BattlegroundBracketId GetBracketId() const;
         uint32 GetInstanceID() const        { return m_InstanceID; }
@@ -289,21 +294,20 @@ class TC_GAME_API Battleground
         uint32 GetMinPlayersPerTeam() const;
 
         int32 GetStartDelayTime() const     { return m_StartDelayTime; }
-        uint8 GetArenaType() const          { return m_ArenaType; }
+        uint8 GetArenaType() const          { return m_QueueID.TeamSize; }
         PvPTeamId GetWinner() const { return _winnerTeamId; }
         uint32 GetScriptId() const;
         uint32 GetBonusHonorFromKill(uint32 kills) const;
 
         // Set methods:
         //here we can count minlevel and maxlevel for players
+        void SetQueueId(BattlegroundQueueTypeId queueId) { m_QueueID = queueId; }
         void SetBracket(PVPDifficultyEntry const* bracketEntry);
         void SetInstanceID(uint32 InstanceID) { m_InstanceID = InstanceID; }
         void SetStatus(BattlegroundStatus Status) { m_Status = Status; }
         void SetClientInstanceID(uint32 InstanceID) { m_ClientInstanceID = InstanceID; }
         void SetElapsedTime(uint32 Time)        { m_StartTime = Time; }
         void SetRemainingTime(uint32 Time)      { m_EndTime = Time; }
-        void SetRated(bool state)           { m_IsRated = state; }
-        void SetArenaType(uint8 type)       { m_ArenaType = type; }
         void SetWinner(PvPTeamId winnerTeamId) { _winnerTeamId = winnerTeamId; }
         std::unordered_set<uint32> const* GetPvpStatIds() const { return _pvpStatIds; }
 
@@ -366,10 +370,25 @@ class TC_GAME_API Battleground
         {
             return thisTeamPlayers < maxPlayersPerTeam ? maxPlayersPerTeam - thisTeamPlayers : 0u;
         }
+        // A waiting real player's team is full of bots but none can leave this moment (all in combat or carrying a flag): the player waits
+        // for one to become free instead of a second instance being opened. False when the places can be made now, or when the team is
+        // mostly real players and there is nobody to swap.
+        static constexpr bool WaitForBotToFree(uint32 placesToMake, uint32 evictableNow, uint32 botsOnTeam)
+        {
+            return placesToMake > evictableNow && botsOnTeam >= placesToMake;
+        }
+        // The shortfall minus the bots an earlier top-up already created or reused for this side that have not queued yet (their setup is
+        // still running). WSG 2026-10-21: one player's queue opened ten instances, because every 20 s prep tick asked again for places
+        // the bots in setup were about to take, and the surplus formed new battlegrounds.
+        static constexpr uint32 TopUpAfterInFlight(uint32 thisTeamPlayers, uint32 maxPlayersPerTeam, uint32 inFlight)
+        {
+            uint32 const request = TopUpRequest(thisTeamPlayers, maxPlayersPerTeam);
+            return request > inFlight ? request - inFlight : 0u;
+        }
 
         bool isArena() const;
         bool isBattleground() const;
-        bool isRated() const        { return m_IsRated; }
+        bool isRated() const        { return m_QueueID.Rated; }
 
         typedef std::map<ObjectGuid, BattlegroundPlayer> BattlegroundPlayerMap;
         BattlegroundPlayerMap const& GetPlayers() const { return m_Players; }
@@ -594,6 +613,7 @@ class TC_GAME_API Battleground
 
     private:
         // Battleground
+        BattlegroundQueueTypeId m_QueueID;
         uint32 m_InstanceID;                                // Battleground Instance's GUID!
         BattlegroundStatus m_Status;
         uint32 m_ClientInstanceID;                          // the instance-id which is sent to the client and without any other internal use
@@ -601,13 +621,11 @@ class TC_GAME_API Battleground
         uint32 m_ResetStatTimer;
         uint32 m_ValidStartPositionTimer;
         int32 m_EndTime;                                    // it is set to 120000 when bg is ending and it decreases itself
-        uint8  m_ArenaType;                                 // 2=2v2, 3=3v3, 5=5v5
         bool   m_InBGFreeSlotQueue;                         // used to make sure that BG is only once inserted into the BattlegroundMgr.BGFreeSlotQueue[bgTypeId] deque
         bool   m_SetDeleteThis;                             // used for safe deletion of the bg after end / all players leave
 
         PvPTeamId _winnerTeamId;
         int32  m_StartDelayTime;
-        bool   m_IsRated;                                   // is this battle rated?
         bool   m_PrematureCountDown;
         uint32 m_LastPlayerPositionBroadcast;
 

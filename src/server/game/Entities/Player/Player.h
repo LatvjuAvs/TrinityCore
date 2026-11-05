@@ -430,9 +430,11 @@ struct ActionButton
     }
 };
 
-#define MAX_ACTION_BUTTONS 180
+// Classic 1.60.1.70009 sends 360 action buttons (SMSG_UPDATE_ACTION_BUTTONS decoder asserts 8 * 360 + 1); the
+// controller UI binds above 180, so the server stores all 360 (was 180).
+#define MAX_ACTION_BUTTONS 360
 
-typedef std::map<uint8, ActionButton> ActionButtonList;
+typedef std::map<uint16, ActionButton> ActionButtonList;
 
 struct PvPInfo
 {
@@ -1212,6 +1214,7 @@ private:
 
 uint32 constexpr PLAYER_MAX_HONOR_LEVEL = 500;
 uint8 constexpr PLAYER_LEVEL_MIN_HONOR = 10;
+uint32 constexpr CURRENCY_HONOR_CLASSIC = 1792; // Classic 1.60: Honor currency spent at the PvP quartermasters
 uint32 constexpr SPELL_PVP_RULES_ENABLED = 134735;
 float constexpr MAX_AREA_SPIRIT_HEALER_RANGE = 20.0f;
 
@@ -1502,6 +1505,12 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         void AutoSelectAmmo();                              // keeps a usable ammo set, or picks one from the bags
         void TakeAmmo();                                    // one shot
         bool IsAmmoUsableWithRangedWeapon(ItemTemplate const* proto) const;
+        // The display the client draws an arrow or bullet with: 0 when the item has none. The generic 1.60 ammo display (737992 / 737993, from 500000 up)
+        // has no model: the client draws a white box for it, nocked and in flight.
+        static uint32 GetAmmoDisplayId(ItemTemplate const* proto);
+        static bool HasDrawableAmmoDisplay(ItemTemplate const* proto) { uint32 const id = GetAmmoDisplayId(proto); return id && id < 500000; }
+        // A player without a client to choose its ammo (a bot) sets this: AutoSelectAmmo then takes a stack that is drawn with a model.
+        void SetPreferDrawableAmmo(bool on) { m_preferDrawableAmmo = on; }
         bool NeedsAmmo() const;                             // bow, gun or crossbow equipped
         Item* GetShield(bool useable = false) const;
         Item* GetChildItemByGuid(ObjectGuid guid) const;
@@ -1662,7 +1671,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         Item* GetItemFromBuyBackSlot(uint32 slot);
         void RemoveItemFromBuyBackSlot(uint32 slot, bool del);
         void SendEquipError(InventoryResult msg, Item const* item1 = nullptr, Item const* item2 = nullptr, uint32 itemId = 0) const;
-        void SendBuyError(BuyResult msg, Creature* creature, uint32 item, uint32 param) const;
+        void SendBuyError(BuyResult msg, Creature const* creature, uint32 vendorslot) const;
         void SendSellError(SellResult msg, Creature* creature, ObjectGuid guid) const;
         void AddWeaponProficiency(uint32 newflag) { m_WeaponProficiency |= newflag; }
         void AddArmorProficiency(uint32 newflag) { m_ArmorProficiency |= newflag; }
@@ -2056,6 +2065,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         UF::TraitConfig const* GetClassicSpecGroupConfig(bool secondary) const;   // Classic 1.60 dual spec
         bool ActivateClassicSpecGroup(bool secondary);
         bool PurchaseClassicDualSpec();
+        bool UntrainClassicPet(int64 cost);
         static bool IsClassicDualSpecGossipOption(int32 gossipOptionId);
         TalentLearnResult LearnTalent(uint32 talentId, int32* spellOnCooldown);
         bool AddTalent(TalentEntry const* talent, uint8 spec, bool learning);
@@ -2150,12 +2160,12 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         uint32 GetMovie() const { return m_movie; }
         void SetMovie(uint32 movie) { m_movie = movie; }
 
-        ActionButton* AddActionButton(uint8 button, uint64 action, uint8 type);
-        void RemoveActionButton(uint8 button);
-        ActionButton const* GetActionButton(uint8 button);
+        ActionButton* AddActionButton(uint16 button, uint64 action, uint8 type);
+        void RemoveActionButton(uint16 button);
+        ActionButton const* GetActionButton(uint16 button);
         void SendInitialActionButtons() const { SendActionButtons(0); }
         void SendActionButtons(uint32 state) const;
-        bool IsActionButtonDataValid(uint8 button, uint64 action, uint8 type) const;
+        bool IsActionButtonDataValid(uint16 button, uint64 action, uint8 type) const;
         void SetMultiActionBars(uint8 mask) { SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::MultiActionBars), mask); }
 
         PvPInfo pvpInfo;
@@ -2827,6 +2837,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         // Temporarily removed pet cache
         uint32 GetTemporaryUnsummonedPetNumber() const { return m_temporaryUnsummonedPetNumber; }
         void SetTemporaryUnsummonedPetNumber(uint32 petnumber) { m_temporaryUnsummonedPetNumber = petnumber; }
+        void DelayPetResummon(uint32 ms) { m_petResummonDelay = ms; }
         Optional<ReactStates> GetTemporaryPetReactState() const { return m_temporaryPetReactState; }
         void DisablePetControlsOnMount(ReactStates reactState, CommandStates commandState);
         void EnablePetControlsOnDismount();
@@ -3320,6 +3331,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         bool m_itemUpdateQueueBlocked;
 
         uint32 m_ExtraFlags;
+        bool m_preferDrawableAmmo = false;
 
         std::atomic<float> _botCastSpeedMod{ 1.0f };
 
@@ -3485,6 +3497,8 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
 
         // Temporary removed pet cache
         uint32 m_temporaryUnsummonedPetNumber;
+        uint32 m_botSheathIdleMs = 0;                       // bot only: ms with weapons drawn and no fight
+        uint32 m_petResummonDelay;                          // ms until the pet remembered at login is summoned (0 = none pending)
         Optional<ReactStates> m_temporaryPetReactState;
         uint32 m_oldpetspell;
         ObjectGuid m_temporaryUnsummonedBattlePet;

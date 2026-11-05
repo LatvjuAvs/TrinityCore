@@ -16,7 +16,9 @@
  */
 
 #include "Unit.h"
+#include "ClassicRage.h"
 #include "ClassicArmor.h"
+#include "ClassicAutoShot.h"
 #include "DeathRecap.h"
 #include "AbstractFollower.h"
 #include "Battlefield.h"
@@ -95,6 +97,7 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include <atomic>
 #include <queue>
 #include <sstream>
 #include <cmath>
@@ -844,6 +847,11 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit const* excludeCasterChannel
     return effects;
 }
 
+// Running totals of the rage a melee hit rewarded (the damage it was computed from and the power gained, in tenths of rage), read by the damage
+// parity run to log rage per hit against the formula.
+TC_GAME_API std::atomic<uint64> g_classicRageHitDamage(0);
+TC_GAME_API std::atomic<uint64> g_classicRageHitGained(0);
+
 /*static*/ uint32 Unit::DealDamage(Unit* attacker, Unit* victim, uint32 damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellInfo const* spellProto, bool durabilityLoss)
 {
     uint32 damageDone = damage;
@@ -943,7 +951,7 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit const* excludeCasterChannel
 
     // Classic 1.60 (vanilla): rage from damage taken
     if (attacker && attacker != victim && damagetype != NODAMAGE && damageTaken && victim->GetTypeId() == TYPEID_PLAYER && victim->GetPowerType() == POWER_RAGE)
-        victim->RewardClassicRage(damageTaken, false);
+        victim->RewardClassicRage(float(damageTaken), false);
 
     uint32 health = victim->GetHealth();
 
@@ -1890,14 +1898,16 @@ void Unit::HandleEmoteCommand(Emote emoteId, Player* target /*=nullptr*/, Trinit
 
     // Classic 1.60: the caller (CalcSpellResistedDamage) wants the average resisted fraction, retail returns the raw resistance
     // (creatures have none there): with 1 point of resistance every spell was fully resisted. Vanilla formula: resistance
-    // * 0.75 / (5 * caster level), at most 75%; creatures above the caster's level resist 8 more per level (not binary spells).
+    // * 0.75 / (5 * caster level), at most 75%; creatures above the caster's level resist 8 more per level (not binary spells),
+    // scaled by caster level / 63 and rounded down as in VMaNGOS (SpellCaster::GetSpellResistChance). Unscaled, a level 1 caster
+    // lost 75% of every spell on a level 2 creature (8 * 0.75 / 5 = 1.2).
     uint32 casterLevel = 1;
     if (caster && caster->ToUnit())
     {
         casterLevel = std::max<uint32>(caster->ToUnit()->GetLevelForTarget(victim), 1);
         int32 levelDiff = int32(victim->GetLevelForTarget(caster)) - int32(casterLevel);
         if (levelDiff > 0 && victim->GetTypeId() == TYPEID_UNIT && !(spellInfo && spellInfo->HasAttribute(SPELL_ATTR0_CU_BINARY_SPELL)))
-            victimResistance += float(levelDiff * 8);
+            victimResistance += float(int32(8.0f * levelDiff * casterLevel / 63.0f));
     }
 
     return std::min(victimResistance * 0.75f / (5.0f * casterLevel), 0.75f);
@@ -2078,6 +2088,9 @@ void Unit::HandleEmoteCommand(Emote emoteId, Player* target /*=nullptr*/, Trinit
         // We're going to call functions which can modify content of the list during iteration over it's elements
         // Let's copy the list so we can prevent iterator invalidation
         AuraEffectVector vSplitDamagePctCopy = CopyAuraEffectList(damageInfo.GetVictim()->GetAuraEffectsByType(SPELL_AURA_SPLIT_DAMAGE_PCT));
+        // Classic 1.60 Blessing of Sacrifice: aura 562 moves a flat amount per hit to the caster (tooltip "transfering $s1 damage taken per hit to the caster")
+        for (AuraEffect* flatSplit : CopyAuraEffectList(damageInfo.GetVictim()->GetAuraEffectsByType(SPELL_AURA_562)))
+            vSplitDamagePctCopy.push_back(flatSplit);
         for (auto itr = vSplitDamagePctCopy.begin(); itr != vSplitDamagePctCopy.end() && damageInfo.GetDamage() > 0; ++itr)
         {
             // Check if aura was removed during iteration - we don't need to work on such auras
@@ -2094,7 +2107,8 @@ void Unit::HandleEmoteCommand(Emote emoteId, Player* target /*=nullptr*/, Trinit
             if (!caster || (caster == damageInfo.GetVictim()) || !caster->IsInWorld() || !caster->IsAlive())
                 continue;
 
-            uint32 splitDamage = CalculatePct(damageInfo.GetDamage(), (*itr)->GetAmount());
+            uint32 splitDamage = (*itr)->GetAuraType() == SPELL_AURA_562 ? std::min<uint32>(damageInfo.GetDamage(), std::max<int32>((*itr)->GetAmount(), 0))
+                : CalculatePct(damageInfo.GetDamage(), (*itr)->GetAmount());
 
             (*itr)->GetBase()->CallScriptEffectSplitHandlers((*itr), aurApp, damageInfo, splitDamage);
 
@@ -2349,6 +2363,23 @@ void Unit::AttackerStateUpdate(Unit* victim, WeaponAttackType attType, bool extr
             // Send log damage message to client
             Unit::DealDamageMods(damageInfo.Attacker, victim, damageInfo.Damage, &damageInfo.Absorb);
 
+            {
+                uint8 outcome = HIT_OUTCOME_OTHER;
+                switch (damageInfo.HitOutCome)
+                {
+                    case MELEE_HIT_MISS:     outcome = HIT_OUTCOME_MISS; break;
+                    case MELEE_HIT_DODGE:    outcome = HIT_OUTCOME_DODGE; break;
+                    case MELEE_HIT_PARRY:    outcome = HIT_OUTCOME_PARRY; break;
+                    case MELEE_HIT_BLOCK:    outcome = HIT_OUTCOME_BLOCK; break;
+                    case MELEE_HIT_GLANCING: outcome = HIT_OUTCOME_GLANCING; break;
+                    case MELEE_HIT_CRIT:     outcome = HIT_OUTCOME_CRIT; break;
+                    case MELEE_HIT_CRUSHING: outcome = HIT_OUTCOME_CRUSHING; break;
+                    case MELEE_HIT_NORMAL:   outcome = HIT_OUTCOME_HIT; break;
+                    default: break;
+                }
+                sScriptMgr->OnHitOutcome(this, victim, 0, outcome, damageInfo.Damage);
+            }
+
             // sparring
             if (Creature* victimCreature = victim->ToCreature())
             {
@@ -2359,18 +2390,22 @@ void Unit::AttackerStateUpdate(Unit* victim, WeaponAttackType attType, bool extr
             // Classic 1.60 (vanilla): rage from the damage dealt, 75% of the damage on a dodge / parry (retail: per weapon speed)
             if (this != victim && damageInfo.HitOutCome != MELEE_HIT_MISS && GetPowerType() == POWER_RAGE)
             {
-                uint32 rageDamage = (damageInfo.HitOutCome == MELEE_HIT_DODGE || damageInfo.HitOutCome == MELEE_HIT_PARRY)
-                    ? uint32(damageInfo.CleanDamage * 0.75f) : damageInfo.Damage + damageInfo.Absorb;
                 // Classic 1.60 (client 70374): Dual Wield Specialization 23584 "Increases the damage done by your off-hand weapon by $m1%
                 // and the Rage generated by your off-hand attacks by $m2%" (effect 1: server-side dummy, 10-50% by talent rank)
+                float offHandRageBonusPct = 0.0f;
                 if (damageInfo.AttackType == OFF_ATTACK)
                     if (AuraEffect const* dualWieldSpec = GetAuraEffect(23584, EFFECT_1))
                         if (dualWieldSpec->GetAuraType() == SPELL_AURA_DUMMY)
-                            rageDamage = uint32(rageDamage * (1.0f + dualWieldSpec->GetAmount() / 100.0f));
-                if (rageDamage)
+                            offHandRageBonusPct = float(dualWieldSpec->GetAmount());
+                // kept fractional until the rage is worked out, so the talent's bonus is not rounded away on small hits
+                float const rageDamage = ClassicRage::SwingRageDamage(damageInfo.HitOutCome == MELEE_HIT_DODGE || damageInfo.HitOutCome == MELEE_HIT_PARRY,
+                    damageInfo.CleanDamage, damageInfo.Damage + damageInfo.Absorb, offHandRageBonusPct);
+                if (rageDamage > 0.0f)
                 {
                     damageInfo.HitInfo |= HITINFO_RAGE_GAIN;
                     damageInfo.RageGained = RewardClassicRage(rageDamage, true);
+                    g_classicRageHitDamage.fetch_add(uint64(rageDamage + 0.5f), std::memory_order_relaxed);
+                    g_classicRageHitGained.fetch_add(uint64(std::max<int64>(int64(damageInfo.RageGained), 0)), std::memory_order_relaxed);
                 }
             }
 
@@ -2410,6 +2445,10 @@ void Unit::HandleProcExtraAttackFor(Unit* victim, uint32 count)
 
 void Unit::AddExtraAttacks(uint32 count)
 {
+    // Classic 1.60 (vanilla, VMaNGOS EffectAddExtraAttacks): extra attacks already pending are not added to
+    if (!extraAttacksTargets.empty())
+        return;
+
     ObjectGuid targetGUID = _lastDamagedTargetGuid;
     if (!targetGUID)
     {
@@ -3087,6 +3126,7 @@ void Unit::_UpdateSpells(uint32 time)
 void Unit::_UpdateAutoRepeatSpell()
 {
     SpellInfo const* autoRepeatSpellInfo = m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_spellInfo;
+    bool const classicAutoShot = autoRepeatSpellInfo->Id == ClassicAutoShot::SpellId && GetTypeId() == TYPEID_PLAYER;
 
     if (HasAuraType(SPELL_AURA_DISABLE_AUTOATTACK))
         return;
@@ -3113,20 +3153,53 @@ void Unit::_UpdateAutoRepeatSpell()
         }
     }
 
+    // A player's client ends Auto Shot (CMSG_CANCEL_AUTO_REPEAT_SPELL) when its target dies; a bot has no client, so the repeat sat on the corpse
+    // for good and the hunter stood in the aim pose with the arrow nocked (PC 20 Oct).
+    if (Player const* player = ToPlayer(); player && player->GetSession()->IsBot())
+        if (Unit const* target = m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_targets.GetUnitTarget(); !target || !target->IsAlive())
+        {
+            InterruptSpell(CURRENT_AUTOREPEAT_SPELL, false);
+            return;
+        }
+
+    // Classic 1.60: moving pauses Auto Shot and restarts its half-second wind-up; no shot leaves while the hunter moves
+    if (classicAutoShot && isMoving())
+    {
+        m_classicAutoShotStillSince = GameTime::GetGameTimeMS();
+        return;
+    }
+
     // castroutine
     if (isAttackReady(RANGED_ATTACK) && m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->getState() != SPELL_STATE_PREPARING)
     {
+        if (classicAutoShot && !IsClassicAutoShotWindupDone())
+            return;
+
         // Check if able to cast
         SpellCastResult result = m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->CheckCast(true);
         if (result != SPELL_CAST_OK)
         {
-            if (autoRepeatSpellInfo->Id != 75)
+            if (classicAutoShot)
+            {
+                // Classic 1.60: wait (range, facing, line of sight) or stop (ammo, weapon, target); the reason is told once
+                bool const stop = ClassicAutoShot::OnFailedShot(result) == ClassicAutoShot::FailAction::Stop;
+                if (stop || ClassicAutoShot::ShouldReport(result, m_classicAutoShotLastReported))
+                {
+                    Spell::SendCastResult(ToPlayer(), autoRepeatSpellInfo, m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_SpellVisual,
+                        m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_castId, result);
+                    m_classicAutoShotLastReported = result;
+                }
+                if (stop)
+                    InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
+            }
+            else if (autoRepeatSpellInfo->Id != 75)
                 InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
             else if (GetTypeId() == TYPEID_PLAYER)
                 Spell::SendCastResult(ToPlayer(), autoRepeatSpellInfo, m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_SpellVisual, m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_castId, result);
 
             return;
         }
+        m_classicAutoShotLastReported = SPELL_CAST_OK;
 
         // we want to shoot
         Spell* spell = new Spell(this, autoRepeatSpellInfo, TRIGGERED_IGNORE_GCD);
@@ -3214,6 +3287,14 @@ void Unit::SetCurrentCastSpell(Spell* pSpell)
         }
         case CURRENT_AUTOREPEAT_SPELL:
         {
+            // Classic 1.60: Auto Shot turned on (not the next shot of a running one) starts its half-second wind-up
+            if (pSpell->GetSpellInfo()->Id == ClassicAutoShot::SpellId
+                && (!m_currentSpells[CSpellType] || m_currentSpells[CSpellType]->GetSpellInfo()->Id != ClassicAutoShot::SpellId))
+            {
+                m_classicAutoShotStillSince = GameTime::GetGameTimeMS();
+                m_classicAutoShotLastReported = SPELL_CAST_OK;
+            }
+
             if (m_currentSpells[CSpellType] && m_currentSpells[CSpellType]->getState() == SPELL_STATE_IDLE)
                 m_currentSpells[CSpellType]->setState(SPELL_STATE_FINISHED);
 
@@ -3264,6 +3345,15 @@ void Unit::InterruptSpell(CurrentSpellTypes spellType, bool withDelayed, bool wi
             if (GetTypeId() == TYPEID_PLAYER)
                 ToPlayer()->SendAutoRepeatCancel(this);
 
+        // Classic 1.60: a shot already in flight (Auto Shot, Shoot) lands; stopping the repeat stops the next shot, not this one.
+        // Cancelling it here threw the arrow's damage away when the target was cleared or Auto Shot was stopped mid-flight.
+        if (spellType == CURRENT_AUTOREPEAT_SPELL && spell->getState() == SPELL_STATE_LAUNCHED)
+        {
+            m_currentSpells[spellType] = nullptr;
+            spell->SetReferencedFromCurrent(false);
+            return;
+        }
+
         if (spell->getState() != SPELL_STATE_FINISHED)
             spell->cancel(result, resultOther, interrupter);
         else
@@ -3287,6 +3377,19 @@ void Unit::FinishSpell(CurrentSpellTypes spellType, SpellCastResult result /*= S
         spell->SendChannelUpdate(0, result);
 
     spell->finish(result);
+}
+
+bool Unit::IsClassicAutoShotWindupDone() const
+{
+    if (GetTypeId() != TYPEID_PLAYER)
+        return true;
+
+    // Auto Shot not on yet: this is the shot that turns it on, the wind-up starts with it
+    Spell const* current = m_currentSpells[CURRENT_AUTOREPEAT_SPELL];
+    if (!current || current->GetSpellInfo()->Id != ClassicAutoShot::SpellId)
+        return false;
+
+    return ClassicAutoShot::IsWindupDone(GameTime::GetGameTimeMS(), m_classicAutoShotStillSince);
 }
 
 void Unit::CancelAutoRepeatSpell()
@@ -6691,6 +6794,7 @@ void Unit::SetCharm(Unit* charm, bool apply)
 
     // Hook for OnHeal Event
     sScriptMgr->OnHeal(healer, victim, (uint32&)gain);
+    sScriptMgr->OnHealOutcome(healer, victim, healInfo.GetSpellInfo() ? healInfo.GetSpellInfo()->Id : 0, addhealth, uint32(gain));
 
     Unit* unit = healer;
     if (healer && healer->GetTypeId() == TYPEID_UNIT && healer->IsTotem())
@@ -6971,13 +7075,12 @@ static ClassicSpellValue::Value const* ClassicCoefficientRow(SpellInfo const* sp
     return sSpellMgr->GetClassicSpellValue(spellInfo->Id, uint32(effectInfo.EffectIndex));
 }
 
-// Classic 1.60 (vanilla, VMaNGOS SpellCaster::CalculateLevelPenalty): spells learned below level 20 get less from spell power,
-// 1 - (20 - spell level) * 3.75% (Fireball rank 1: 0.429 x 0.2875 = 0.123). The 1.60 client coefficients are the unpenalized ones.
-static float ClassicSpellLevelPenalty(SpellInfo const* spellInfo)
+// Classic 1.60: the spell power / healing power factor of an effect with the vanilla level penalty in. A vanilla table row is
+// already penalised and is taken as it is; the client's coefficient is the unpenalized one and gets 1 - (20 - spell level) * 3.75%
+// below level 20 (Fireball rank 1: 0.429 x 0.2875 = 0.123). See ClassicSpellValue::BonusCoefficientWithLevelPenalty.
+static float ClassicBonusCoefficient(SpellInfo const* spellProto, SpellEffectInfo const& spellEffectInfo)
 {
-    if (!spellInfo || spellInfo->SpellLevel <= 0 || spellInfo->SpellLevel >= 20)
-        return 1.0f;
-    return 1.0f - (20.0f - float(spellInfo->SpellLevel)) * 0.0375f;
+    return ClassicSpellValue::BonusCoefficientWithLevelPenalty(ClassicCoefficientRow(spellProto, spellEffectInfo), spellEffectInfo.BonusCoefficient, int32(spellProto->SpellLevel));
 }
 
 int32 Unit::SpellDamageBonusDone(Unit* victim, SpellInfo const* spellProto, int32 pdamage, DamageEffectType damagetype, SpellEffectInfo const& spellEffectInfo, uint32 stack /*= 1*/, Spell* spell /*= nullptr*/, AuraEffect const* aurEff /*= nullptr*/) const
@@ -7052,7 +7155,7 @@ int32 Unit::SpellDamageBonusDone(Unit* victim, SpellInfo const* spellProto, int3
     // Default calculation
     if (DoneAdvertisedBenefit)
     {
-        float coeff = ClassicSpellValue::BonusCoefficientOr(ClassicCoefficientRow(spellProto, spellEffectInfo), spellEffectInfo.BonusCoefficient) * ClassicSpellLevelPenalty(spellProto);
+        float coeff = ClassicBonusCoefficient(spellProto, spellEffectInfo);
         if (Player* modOwner = GetSpellModOwner())
         {
             coeff *= 100.0f;
@@ -7575,7 +7678,7 @@ int32 Unit::SpellHealingBonusDone(Unit* victim, SpellInfo const* spellProto, int
     // Default calculation
     if (DoneAdvertisedBenefit)
     {
-        float coeff = spellEffectInfo.BonusCoefficient * ClassicSpellLevelPenalty(spellProto);
+        float coeff = ClassicBonusCoefficient(spellProto, spellEffectInfo);
         if (Player* modOwner = GetSpellModOwner())
         {
             coeff *= 100.0f;
@@ -7797,7 +7900,11 @@ int32 Unit::SpellBaseHealingBonusDone(SpellSchoolMask schoolMask) const
 
 int32 Unit::SpellBaseAbsorbBonusDone(SpellSchoolMask schoolMask) const
 {
-    return SpellBaseHealingBonusDone(schoolMask);
+    // Classic 1.60 (vanilla, VMaNGOS Aura::HandleSchoolAbsorb): a holy shield (Power Word: Shield) grows with healing power, the mage and
+    // warlock wards (Fire Ward, Frost Ward, Shadow Ward) with spell damage of their school.
+    if (schoolMask & SPELL_SCHOOL_MASK_HOLY)
+        return SpellBaseHealingBonusDone(schoolMask);
+    return SpellBaseDamageBonusDone(schoolMask);
 }
 
 int32 Unit::SpellAbsorbBonusDone(Unit* victim, SpellInfo const* spellProto, int32 absorbamount, SpellEffectInfo const& spellEffectInfo, uint32 stack /*= 1*/, AuraEffect const* aurEff /*= nullptr*/) const
@@ -7846,7 +7953,7 @@ int32 Unit::SpellAbsorbBonusDone(Unit* victim, SpellInfo const* spellProto, int3
 
     if (doneAdvertisedBenefit)
     {
-        float coeff = spellEffectInfo.BonusCoefficient * ClassicSpellLevelPenalty(spellProto);
+        float coeff = ClassicBonusCoefficient(spellProto, spellEffectInfo);
 
         if (Player* modOwner = GetSpellModOwner())
         {
@@ -9105,9 +9212,21 @@ void Unit::UpdateSpeed(UnitMoveType mtype)
     }
 
     // Apply strongest slow aura mod to speed
-    float slow = GetMaxNegativeAuraModifier(SPELL_AURA_MOD_DECREASE_SPEED);
-    if (slow)
-        AddPct(speed, slow);
+    switch (mtype)
+    {
+        case MOVE_WALK:
+        case MOVE_RUN:
+        case MOVE_RUN_BACK:
+        case MOVE_SWIM:
+        case MOVE_FLIGHT:
+        {
+            if (float slow = GetMaxNegativeAuraModifier(SPELL_AURA_MOD_DECREASE_SPEED))
+                AddPct(speed, slow);
+            break;
+        }
+        default:
+            break;
+    }
 
     if (float minSpeedMod = GetMaxPositiveAuraModifier(SPELL_AURA_MOD_MINIMUM_SPEED))
     {
@@ -10321,6 +10440,20 @@ void Unit::SetPower(Powers power, int32 val, bool withPowerUpdate /*= true*/)
     int32 oldPower = m_unitData->Power[powerIndex];
     SetUpdateFieldValue(m_values.ModifyValue(&Unit::m_unitData).ModifyValue(&UF::UnitData::Power, powerIndex), val);
 
+    // Diagnostic: a warrior's combo points are only meant to come from a dodged attack (Overpower), yet damage_parity runs hold 1-5 of them with no dodge
+    // on record. Logs who raised them (the spell in progress, and the call when no spell is), a few dozen lines at most.
+    if (power == POWER_COMBO_POINTS && val > oldPower && GetClass() == CLASS_WARRIOR && IsPlayer())
+    {
+        static std::atomic<uint32> loggedWarriorComboRises{ 0 };
+        if (loggedWarriorComboRises.fetch_add(1) < 60)
+        {
+            Spell const* current = GetCurrentSpell(CURRENT_GENERIC_SPELL);
+            Spell const* melee = GetCurrentSpell(CURRENT_MELEE_SPELL);
+            TC_LOG_ERROR("scripts.classic", "Warrior combo points {} -> {}: generic spell {}, melee spell {}", oldPower, val,
+                current ? current->GetSpellInfo()->Id : 0, melee ? melee->GetSpellInfo()->Id : 0);
+        }
+    }
+
     // Classic 1.60: also send combo point changes as a power update (the official rogue sniff 70338 has type 4 power updates);
     // energize changes the power without one. The client shows them only on UnitData ClassicComboTarget (Spell::EffectEnergize)
     if (power == POWER_COMBO_POINTS && IsPlayer() && oldPower != val)
@@ -10809,8 +10942,16 @@ void Unit::ProcSkillsAndReactives(bool isVictim, Unit* procTarget, ProcFlagsInit
                 // if victim and parry attack
                 if (hitMask & PROC_HIT_PARRY)
                 {
-                    ModifyAuraState(AURA_STATE_DEFENSIVE, true);
-                    StartReactiveTimer(REACTIVE_DEFENSE);
+                    if (GetClass() == CLASS_HUNTER)  // Counterattack needs the hunter parry state
+                    {
+                        ModifyAuraState(AURA_STATE_DEFENSIVE_2, true);
+                        StartReactiveTimer(REACTIVE_DEFENSE_2);
+                    }
+                    else
+                    {
+                        ModifyAuraState(AURA_STATE_DEFENSIVE, true);
+                        StartReactiveTimer(REACTIVE_DEFENSE);
+                    }
                 }
                 // if and victim block attack
                 if (hitMask & PROC_HIT_BLOCK)
@@ -10819,6 +10960,11 @@ void Unit::ProcSkillsAndReactives(bool isVictim, Unit* procTarget, ProcFlagsInit
                     StartReactiveTimer(REACTIVE_DEFENSE);
                 }
             }
+            // for attacker: a warrior whose target dodges has the combo point Overpower costs for the length of the reactive timer (VMaNGOS: Unit::ProcDamageAndSpell,
+            // REACTIVE_OVERPOWER). The point itself comes from the client's own proc aura 1282735 "Offensive State (DND)" -> 1282733, restricted to dodges by its
+            // spell_proc row; the timer only clears it again.
+            else if ((hitMask & PROC_HIT_DODGE) && GetClass() == CLASS_WARRIOR && IsPlayer())
+                StartReactiveTimer(REACTIVE_OVERPOWER);
         }
     }
 }
@@ -11213,6 +11359,8 @@ void Unit::ClearAllReactives()
         ModifyAuraState(AURA_STATE_DEFENSIVE, false);
     if (HasAuraState(AURA_STATE_DEFENSIVE_2))
         ModifyAuraState(AURA_STATE_DEFENSIVE_2, false);
+    if (GetClass() == CLASS_WARRIOR && IsPlayer())
+        SetPower(POWER_COMBO_POINTS, 0);
 }
 
 void Unit::UpdateReactives(uint32 p_time)
@@ -11237,6 +11385,10 @@ void Unit::UpdateReactives(uint32 p_time)
                 case REACTIVE_DEFENSE_2:
                     if (HasAuraState(AURA_STATE_DEFENSIVE_2))
                         ModifyAuraState(AURA_STATE_DEFENSIVE_2, false);
+                    break;
+                case REACTIVE_OVERPOWER:
+                    if (GetClass() == CLASS_WARRIOR && IsPlayer())
+                        SetPower(POWER_COMBO_POINTS, 0);
                     break;
                 default:
                     break;
@@ -11615,6 +11767,17 @@ void Unit::SetMeleeAnimKitId(uint16 animKitId)
     if (creature && creature->IsPet() && creature->GetOwnerGUID().IsPlayer())
         isRewardAllowed = false;
 
+    // Classic 1.60: open world PvP credit. Battleground kills reach KillRewarder through
+    // Battleground::RewardXPAtKill, which passes the killer explicitly; for a player victim in the
+    // open world nobody did, so the reward list stayed empty and an honorable kill paid no honor,
+    // counted no HK and sent no PvPCredit packet. Add the killer (already resolved to its owner for
+    // pets/totems) so KillRewarder pays honor exactly like the battleground path does. Battleground
+    // victims are excluded: they are rewarded by Battleground::HandleKillPlayer/RewardXPAtKill, and
+    // honoring them here too would pay twice and bypass Battleground.GiveXPForKills.
+    Player* playerVictim = victim->ToPlayer();
+    if (isRewardAllowed && !creature && player && playerVictim && player != playerVictim && !playerVictim->InBattleground())
+        tappers.push_back(player);
+
     // Reward player, his pets, and group/raid members
     // call kill spell proc event (before real die and combat stop to triggering auras removed at death/combat stop)
     if (isRewardAllowed)
@@ -11653,9 +11816,16 @@ void Unit::SetMeleeAnimKitId(uint16 animKitId)
             if (InstanceScript const* instance = creature->GetInstanceScript())
                 dungeonEncounter = instance->GetBossDungeonEncounter(creature);
 
-            if (dungeonEncounter && !tappers.empty() && sWorld->getBoolConfig(CONFIG_LOOT_SHARED_ENCOUNTER_LOOT))
+            // vanilla: a grouped kill in a dungeon leaves one shared corpse under the group's loot method, bosses and trash alike;
+            // trash kept in the round robin looter's personal loot hid the corpse from the master looter and the rest of the raid
+            bool sharedCorpse = false;
+            if (!tappers.empty() && sWorld->getBoolConfig(CONFIG_LOOT_SHARED_ENCOUNTER_LOOT))
+                sharedCorpse = dungeonEncounter || (creature->GetMap()->IsDungeon() &&
+                    std::ranges::any_of(tappers, [](Player const* tapper) { return tapper->GetGroup() != nullptr; }));
+
+            if (sharedCorpse)
             {
-                // vanilla boss loot: the whole loot table on one corpse, looted under the group's loot method
+                // vanilla loot: the whole loot table on one corpse, looted under the group's loot method
                 Group* group = nullptr;
                 Player* looter = tappers[0];
                 for (Player* tapper : tappers)
@@ -11673,7 +11843,8 @@ void Unit::SetMeleeAnimKitId(uint16 animKitId)
                         looter = groupLooter;
 
                 Loot* loot = new Loot(creature->GetMap(), creature->GetGUID(), LOOT_CORPSE, group);
-                loot->SetDungeonEncounterId(dungeonEncounter->ID);
+                if (dungeonEncounter)
+                    loot->SetDungeonEncounterId(dungeonEncounter->ID);
 
                 if (uint32 lootid = creature->GetLootId())
                     loot->FillLoot(lootid, LootTemplates_Creature, looter, !group, false, creature->GetLootMode(), ItemBonusMgr::GetContextForPlayer(creature->GetMap()->GetMapDifficulty(), looter));
@@ -11702,7 +11873,10 @@ void Unit::SetMeleeAnimKitId(uint16 animKitId)
                 else if (!tappers.empty())
                 {
                     Group* group = !groups.empty() ? *groups.begin() : nullptr;
-                    Player* looter = group ? ASSERT_NOTNULL(ObjectAccessor::GetPlayer(*creature, group->GetLooterGuid())) : tappers[0];
+                    Player* looter = tappers[0];
+                    if (group)
+                        if (Player* groupLooter = ObjectAccessor::GetPlayer(*creature, group->GetLooterGuid()))
+                            looter = groupLooter;
 
                     Loot* loot = new Loot(creature->GetMap(), creature->GetGUID(), LOOT_CORPSE, dungeonEncounter ? group : nullptr);
 
@@ -12842,10 +13016,18 @@ float Unit::MeleeSpellMissChance(Unit const* victim, WeaponAttackType attType, S
     // 10 below, 0.04% against players), creatures below level 10 are missed less
     int32 const classicSkillDiff = GetClassicWeaponSkill(attType, victim) - victim->GetClassicDefenseSkill(this);
 
-    // melee attacks while dual wielding have +19% chance to miss
+    // melee attacks while dual wielding have +19% chance to miss; Classic 1.60 (vanilla, VMaNGOS): not while a spell of the physical
+    // school is being cast
     if (!spellInfo && haveOffhandWeapon() && attType != RANGED_ATTACK && !m_currentSpells[CURRENT_MELEE_SPELL]
         && !IsInFeralForm() && !HasAuraType(SPELL_AURA_IGNORE_DUAL_WIELD_HIT_PENALTY))
-        missChance += 19.0f;
+    {
+        bool physicalSpellCast = false;
+        for (uint32 i = CURRENT_FIRST_NON_MELEE_SPELL; i < CURRENT_MAX_SPELL; ++i)
+            if (m_currentSpells[i] && (m_currentSpells[i]->GetSpellInfo()->GetSchoolMask() & SPELL_SCHOOL_MASK_NORMAL))
+                physicalSpellCast = true;
+        if (!physicalSpellCast)
+            missChance += 19.0f;
+    }
 
     if (victim->GetTypeId() == TYPEID_PLAYER)
         missChance -= classicSkillDiff * 0.04f;
@@ -12862,15 +13044,18 @@ float Unit::MeleeSpellMissChance(Unit const* victim, WeaponAttackType attType, S
         if (Player* modOwner = GetSpellModOwner())
             modOwner->ApplySpellMod(spellInfo, SpellModOp::HitChance, resistMissChance);
 
-    missChance -= resistMissChance - 100.0f;
-
-    if (attType == RANGED_ATTACK)
-        missChance -= m_modRangedHitChance;
-    else
-        missChance -= m_modMeleeHitChance;
+    float hitChance = resistMissChance - 100.0f;
+    hitChance += attType == RANGED_ATTACK ? m_modRangedHitChance : m_modMeleeHitChance;
 
     // miss chance from auras after calculating skill based miss
-    missChance -= GetTotalAuraModifier(SPELL_AURA_MOD_HIT_CHANCE);
+    hitChance += GetTotalAuraModifier(SPELL_AURA_MOD_HIT_CHANCE);
+
+    // Classic 1.60 (vanilla, VMaNGOS GetMeleeMissChance): the first 1% of +hit from talents and gear is ignored against a victim whose
+    // maximum defense is more than 10 above the attacker's weapon skill (a boss three levels above a 300 skill player)
+    if (hitChance > 0.0f && GetClassicWeaponSkill(attType, victim) - int32(victim->GetMaxSkillValueForLevel(this)) < -10)
+        hitChance -= 1.0f;
+
+    missChance -= hitChance;
     if (attType == RANGED_ATTACK)
         missChance -= victim->GetTotalAuraModifier(SPELL_AURA_MOD_ATTACKER_RANGED_HIT_CHANCE);
     else
@@ -13530,11 +13715,9 @@ void Unit::UpdateHeight(float newZ)
 }
 
 // Classic 1.60 (vanilla, VMaNGOS): rage = damage / conversion(level) * 7.5 when dealing, * 2.5 when taking damage
-int32 Unit::RewardClassicRage(uint32 damage, bool attacker)
+int32 Unit::RewardClassicRage(float damage, bool attacker)
 {
-    float level = float(GetLevel());
-    float conversion = 0.0091107836f * level * level + 3.225598133f * level + 4.2652911f;
-    float addRage = float(damage) / conversion * (attacker ? 7.5f : 2.5f);
+    float addRage = ClassicRage::RageFromDamage(damage, float(GetLevel()), attacker);
     if (attacker)
         AddPct(addRage, GetTotalAuraModifier(SPELL_AURA_MOD_RAGE_FROM_DAMAGE_DEALT));
     addRage *= sWorld->getRate(RATE_POWER_RAGE_INCOME);

@@ -87,6 +87,7 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include <atomic>
 
 NonDefaultConstructible<SpellEffectHandlerFn> SpellEffectHandlers[TOTAL_SPELL_EFFECTS] =
 {
@@ -385,7 +386,7 @@ NonDefaultConstructible<SpellEffectHandlerFn> SpellEffectHandlers[TOTAL_SPELL_EF
     &Spell::EffectModifyCooldownsByCategory,                //292 SPELL_EFFECT_MODIFY_COOLDOWNS_BY_CATEGORY
     &Spell::EffectModifySpellCharges,                       //293 SPELL_EFFECT_MODIFY_CHARGES
     &Spell::EffectNULL,                                     //294 SPELL_EFFECT_CRAFT_LOOT
-    &Spell::EffectNULL,                                     //295 SPELL_EFFECT_SALVAGE_ITEM
+    &Spell::EffectSalvageItem,                              //295 SPELL_EFFECT_SALVAGE_ITEM
     &Spell::EffectNULL,                                     //296 SPELL_EFFECT_CRAFT_SALVAGE_ITEM
     &Spell::EffectNULL,                                     //297 SPELL_EFFECT_RECRAFT_ITEM
     &Spell::EffectNULL,                                     //298 SPELL_EFFECT_CANCEL_ALL_PRIVATE_CONVERSATIONS
@@ -1598,6 +1599,34 @@ void Spell::EffectEnergize()
         return;
 
     Powers power = Powers(effectInfo->MiscValue);
+
+    // Diagnostic with the SetPower log in Unit.cpp: which energize spell, called from which aura, gives a warrior a combo point.
+    if (power == POWER_COMBO_POINTS && unitCaster->GetClass() == CLASS_WARRIOR && unitCaster->IsPlayer())
+    {
+        static std::atomic<uint32> loggedWarriorComboEnergize{ 0 };
+        if (loggedWarriorComboEnergize.fetch_add(1) < 60)
+            TC_LOG_ERROR("scripts.classic", "Warrior combo energize: spell {}, by aura {}, max combo points {}", m_spellInfo->Id,
+                m_triggeredByAuraSpell ? m_triggeredByAuraSpell->Id : 0, unitTarget->GetMaxPower(power));
+
+        // What those two spells are, read from the spell store the server cast them from (the hotfix and world tables hold neither id).
+        static std::atomic<uint32> dumpedWarriorComboSpells{ 0 };
+        if (dumpedWarriorComboSpells.fetch_add(1) < 2)
+        {
+            for (SpellInfo const* info : { m_spellInfo, m_triggeredByAuraSpell })
+            {
+                if (!info)
+                    continue;
+                TC_LOG_ERROR("scripts.classic", "Warrior combo spell {} \"{}\": proc chance {}, attributes {:#x}",
+                    info->Id, info->SpellName && (*info->SpellName)[DEFAULT_LOCALE] ? (*info->SpellName)[DEFAULT_LOCALE] : "?",
+                    info->ProcChance, info->Attributes);
+                for (SpellEffectInfo const& eff : info->GetEffects())
+                    if (eff.Effect)
+                        TC_LOG_ERROR("scripts.classic", "Warrior combo spell {} effect {}: effect {}, aura {}, misc {}, base points {}, trigger spell {}",
+                            info->Id, uint32(eff.EffectIndex), uint32(eff.Effect), uint32(eff.ApplyAuraName), eff.MiscValue, eff.BasePoints, eff.TriggerSpell);
+            }
+        }
+    }
+
     if (unitTarget->GetMaxPower(power) == 0)
         return;
 
@@ -4671,6 +4700,41 @@ void Spell::EffectProspecting()
     itemTarget->m_loot.reset(new Loot(player->GetMap(), itemTarget->GetGUID(), LOOT_PROSPECTING, nullptr));
     itemTarget->m_loot->FillLoot(itemTarget->GetEntry(), LootTemplates_Prospecting, player, true);
     player->SendLoot(*itemTarget->m_loot);
+}
+
+// Classic 1.60: the mage's Decipher spells salvage an untranslated scroll. The client only offers items of the spell's ItemSalvage
+// list (MiscValue[0]); the server gives the scroll's item loot and takes one scroll. Results that do not fit in the bags are mailed.
+void Spell::EffectSalvageItem()
+{
+    if (effectHandleMode != SPELL_EFFECT_HANDLE_HIT_TARGET)
+        return;
+
+    Player* player = m_caster->ToPlayer();
+    if (!player || !itemTarget || itemTarget->GetOwnerGUID() != player->GetGUID())
+        return;
+
+    uint32 itemId = itemTarget->GetEntry();
+    if (!LootTemplates_Item.HaveLootFor(itemId))
+        return;
+
+    Loot loot(player->GetMap(), itemTarget->GetGUID(), LOOT_ITEM, nullptr);
+    loot.FillLoot(itemId, LootTemplates_Item, player, true);
+
+    uint32 count = 1;
+    player->DestroyItemCount(itemTarget, count, true);
+    itemTarget = nullptr;
+    m_targets.SetItemTarget(nullptr);
+
+    // skill-ups of the deciphering skill (SkillLineAbility trivial ranks of the spell)
+    player->UpdateCraftSkill(m_spellInfo);
+
+    if (!loot.AutoStore(player, NULL_BAG, NULL_SLOT, true))
+    {
+        for (uint32 i = 0; i < loot.items.size(); ++i)
+            if (LootItem* salvageLoot = loot.LootItemInSlot(i, player))
+                if (salvageLoot->type == LootItemType::Item && !salvageLoot->is_looted)
+                    player->SendItemRetrievalMail(salvageLoot->itemid, salvageLoot->count, salvageLoot->context);
+    }
 }
 
 void Spell::EffectMilling()
