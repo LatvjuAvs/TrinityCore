@@ -3,6 +3,8 @@
 #include "Creature.h"
 #include "../Util/SlowCall.h"
 #include "BotPopulationManager.h"
+#include "HireMgr.h"
+#include "CompanionDelete.h"   // a finder loan bot is deleted like `.bot delete`
 #include "ClassicSpec.h"
 #include "SoakAnchors.h"
 #include "CompanionRole.h"
@@ -1159,6 +1161,7 @@ void BotPopulationManager::RunGearBackfill(uint32 now_ms)
         gear_scan_pos_ = 0;
         gear_regear_count_ = 0;
         Services::Registry().for_each([&](BotId id, BotRegistryEntry const&) { gear_scan_.push_back(id); });
+        ReleaseOfflineLoans(now_ms);
     }
     const uint32 t0 = getMSTime();
     while (gear_scan_pos_ < gear_scan_.size() && getMSTimeDiff(t0, getMSTime()) < kGearBudgetMs)
@@ -1174,9 +1177,52 @@ void BotPopulationManager::RunGearBackfill(uint32 now_ms)
     }
 }
 
+// Hired bots only (Playerbot.Hire.Mode): a Group Finder / dungeon finder bot is lent to its group (HireMgr::SetLoaned). Once it is
+// out of its owner's group (left, dismissed, the owner went offline) it is deleted like `.bot delete`, so a free bot never becomes
+// one to keep. True when it was taken back.
+bool BotPopulationManager::ReleaseLoan(BotId id, Player* p, uint32 now_ms)
+{
+    HireMgr& hire = HireMgr::Instance();
+    if (!hire.IsLoaned(id) || !hire.LoanSettled(id, now_ms) || pending_companions_.contains(id) || pending_deletes_.contains(id))
+        return false;
+    ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(id);
+    if (p)
+    {
+        uint64 const owner_guid = Services::Owners().OwnerCharacter(id);
+        Player const* owner = owner_guid ? ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(owner_guid)) : nullptr;
+        Group* group = p->GetGroup();
+        if (owner && group && group->IsMember(owner->GetGUID()))
+            return false;   // still playing with the group it was lent to
+    }
+    if (!Fleet::MayDeleteCompanion(Services::Accounts().is_pool_account(sCharacterCache->GetCharacterAccountIdByGuid(guid))))
+    {
+        hire.Forget(id);   // never a player's own character; just not a loan any more
+        return false;
+    }
+    TC_LOG_INFO("playerbot.v2", "[hire] finder loan bot {} left its group: it goes", guid.ToString());
+    if (p)
+    {
+        if (Group* group = p->GetGroup())
+            group->RemoveMember(guid);
+        Services::SessionMgr().LogoutBot(guid);
+    }
+    QueueCompanionDelete(id);
+    hire.Forget(id);
+    return true;
+}
+
+void BotPopulationManager::ReleaseOfflineLoans(uint32 now_ms)
+{
+    for (BotId id : HireMgr::Instance().LoanedBots())
+        if (!ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(id)))
+            ReleaseLoan(id, nullptr, now_ms);
+}
+
 void BotPopulationManager::CompanionUpkeep(BotId id, Player* p)
 {
     if (Services::Owners().OwnerCharacter(id) == 0 || IsPlayersOwnCharacter(p))
+        return;
+    if (ReleaseLoan(id, p, getMSTime()))
         return;
     ::Playerbot::API api(p);
     api.learn_class_quest_spells_free();
@@ -1206,6 +1252,8 @@ void BotPopulationManager::CompanionUpkeep(BotId id, Player* p)
             TC_LOG_INFO("playerbot.v2", "[Companion] {} one-time varied gear re-roll: {} slot(s) changed", p->GetName(), changed);
         }
     }
+    // A hired bot's grade health follows its level and gear (and a changed Playerbot.Hire.<Grade>.HealthPct after `.reload config`).
+    HireMgr::Instance().ApplyHealth(p);
 }
 
 void BotPopulationManager::GrantCompanionStarterPet(BotId id, Player* p)
@@ -1690,40 +1738,60 @@ void BotPopulationManager::FinishCompanionSetup(Player* bot, Player* owner, uint
 {
     BotId const id = bot->GetGUID().GetCounter();
     uint8 const old_level = bot->GetLevel();
-    if (owner->GetLevel() > old_level)
+    // A player's own alt (`.playerbot summon`) is only brought and grouped: its level, spells, talents and gear stay the
+    // player's (the same rule as CompanionUpkeep and the gear passes). Before this, `.bot summon all` / `.bot call` levelled it
+    // to the owner and reset its talents.
+    bool const own_character = IsPlayersOwnCharacter(bot);
+    uint32 spells = 0, weapon_skills = 0, riding = 0;
+    ::Playerbot::Result talents = ::Playerbot::Result::Ok;
+    if (!own_character)
     {
-        bot->GiveLevel(owner->GetLevel());
-        bot->InitTalentForLevel();
-        bot->SetXP(0);
-    }
-
-    ::Playerbot::API api(bot);
-    // A companion levelled here never walks to a trainer, so it would fight with its level 1 kit.
-    // Nor does it do its class quests: their abilities (Voidwalker, Bear Form, stances, totems...) and a hunter's pet.
-    api.learn_class_quest_spells_free();
-    uint32 const spells = api.learn_trainer_spells_free();
-    uint32 const weapon_skills = api.learn_weapon_skills_free();
-    // Riding at 40 and 60, so it mounts up with its owner.
-    uint32 const riding = api.learn_riding_free();
-
-    // The role the owner asked for (`.bot add <class> healer`), else the one stored with the companion (`.bot call`, a
-    // relog), else what its talents say; pinned as the bot logic role and the virtual spec, and stored. Before the talent step,
-    // which spends the points down the pinned spec's build.
-    ApplyCompanionRole(bot, Role(role_value), "setup");
-    ::Playerbot::Result const talents = bot->GetLevel() >= 10 ? api.apply_starter_talents() : ::Playerbot::Result::Ok;
-
-    // A new companion's starter kit, or an old companion's pre-variety set, is re-rolled once with the varied
-    // generator (OwnerRegistry::GearVaried); after that the re-gear pass keeps it up with its level.
-    if (!Services::Owners().GearVaried(id))
-    {
-        uint32 changed = 0;
-        if (RerollCompanionGear(bot, changed) == RerollResult::Done)
+        if (owner->GetLevel() > old_level)
         {
-            Services::Owners().MarkGearVaried(id);
-            TC_LOG_INFO("playerbot.v2", "[Companion] {} one-time varied gear re-roll: {} slot(s) changed", bot->GetName(), changed);
+            bot->GiveLevel(owner->GetLevel());
+            bot->InitTalentForLevel();
+            bot->SetXP(0);
+        }
+
+        ::Playerbot::API api(bot);
+        // A companion levelled here never walks to a trainer, so it would fight with its level 1 kit.
+        // Nor does it do its class quests: their abilities (Voidwalker, Bear Form, stances, totems...) and a hunter's pet.
+        api.learn_class_quest_spells_free();
+        spells = api.learn_trainer_spells_free();
+        weapon_skills = api.learn_weapon_skills_free();
+        // Riding at 40 and 60, so it mounts up with its owner.
+        riding = api.learn_riding_free();
+
+        // The role the owner asked for (`.bot add <class> healer`), else the one stored with the companion (`.bot call`, a
+        // relog), else what its talents say; pinned as the bot logic role and the virtual spec, and stored. Before the talent step,
+        // which spends the points down the pinned spec's build.
+        ApplyCompanionRole(bot, Role(role_value), "setup");
+        talents = bot->GetLevel() >= 10 ? api.apply_starter_talents() : ::Playerbot::Result::Ok;
+
+        // A new companion's starter kit, or an old companion's pre-variety set, is re-rolled once with the varied
+        // generator (OwnerRegistry::GearVaried); after that the re-gear pass keeps it up with its level.
+        if (!Services::Owners().GearVaried(id))
+        {
+            uint32 changed = 0;
+            if (RerollCompanionGear(bot, changed) == RerollResult::Done)
+            {
+                Services::Owners().MarkGearVaried(id);
+                TC_LOG_INFO("playerbot.v2", "[Companion] {} one-time varied gear re-roll: {} slot(s) changed", bot->GetName(), changed);
+            }
+        }
+        RegearNow(bot);
+        // A hired bot's grade health (Playerbot.Hire.<Grade>.HealthPct), on the health its new level and gear give it.
+        HireMgr::Instance().ApplyHealth(bot);
+        // GiveLevel fills health and mana for the new level, but the gear put on after it raises the pools again: three mages made for
+        // the owner in UBRS (2026-10-29 09:28:31) stood at 18-19 % mana with their new L60 gear and were in the fight 12 s later, wanding.
+        // A companion just levelled here joins rested.
+        if (bot->GetLevel() > old_level && bot->IsAlive())
+        {
+            bot->SetFullHealth();
+            if (bot->GetMaxPower(POWER_MANA) > 0)
+                bot->SetPower(POWER_MANA, bot->GetMaxPower(POWER_MANA));
         }
     }
-    RegearNow(bot);
 
     // Its own place in a ring around the owner, so companions don't stand inside each other.
     FormationOffset slot_offset{ 5.0f, 0.0f };
@@ -2007,6 +2075,10 @@ static Gear::Owned::GearMode CompanionGearMode(Player const* bot)
     uint32 const account = Services::Owners().GetOwner(bot->GetGUID().GetCounter()).account_id;
     if (!account)
         return Gear::Owned::GearMode::Match;
+    // A hired bot wears its grade's gear (Veteran best, Legend bis), a Sellsword or any companion of a player who must hire the
+    // normal companion gear, whatever the owner chose (HirePolicy.h).
+    if (int const hired = HireMgr::Instance().GearModeOverride(bot->GetGUID().GetCounter(), account); hired >= 0)
+        return Gear::Owned::GearMode(hired);
     return Gear::Owned::EffectiveMode(Gear::Owned::GearMode(Services::Owners().OwnerGearMode(account)), Gear::OwnedAllowedModes(),
                                       bot->GetLevel() >= MaxPlayerLevel());
 }
@@ -2537,6 +2609,10 @@ void BotPopulationManager::CompanionGroupHygiene(uint32 now_ms)
         Player* p = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(id));
         if (!p || !p->IsInWorld() || p->InBattleground() || p->InArena())
             return;
+        // A self-bot (`.playerbot self on`) is the owner's own character on the owner's client, bound to its own account: no other
+        // character of that account is in the group, so it was taken out of its group and queued for a logout (Discord 2026-10-28).
+        if (p->GetSession() && !p->GetSession()->IsBot())
+            return;
         Group* g = p->GetGroup();
         if (!g || g->isBGGroup() || g->isBFGroup() || g->isLFGGroup())
             return;
@@ -2741,6 +2817,10 @@ void BotPopulationManager::BackfillOne(BotId id, Player* p, uint32 now_ms, uint3
     }
     // Owned, below the cap: the best green or blue for the level by role weights (Gear::OwnedLevelGearActive).
     bool const owned_lv = companion && Gear::OwnedLevelGearActive(lvl, bot_role);
+
+    // Raid enchants a bot was given below the cap (older builds enchanted levelling bots too) come off again.
+    if (!is_altbot && lvl < MaxPlayerLevel() && p->IsAlive() && !p->IsInCombat())
+        ::Playerbot::Gear::StripRaidEnchants(p);
 
     // Level-cap bots: raid-ready gear (Playerbot.Behavior.RaidGear). Role stat weights decide, an occupied slot is only
     // upgraded when the pick scores 10% higher; the under-gear tests below (average item level against the level) are
@@ -3572,6 +3652,7 @@ BotPopulationManager::FilterOfflineCandidates(std::vector<OfflineCandidate> cons
     {
         OfflineCandidate const& c = rows[i];
         if (c.alliance != alliance) continue;
+        if (Pool::IsScenarioBot(c.char_guid)) continue;   // a scenario test character is never part of the world population
         out.push_back(c);
         if (out.size() >= cap) break;
     }
@@ -3618,7 +3699,9 @@ uint64 BotPopulationManager::SpawnNew(uint8 level, bool alliance, uint8 race_hin
         // through LoginExisting (distribution_level 0): counting them here
         // stopped a small ambient world short of its target (10 companions
         // + TotalTarget 20 -> cap 22 -> only 12 world bots ever spawned).
-        const uint32 spawn_cap = uint32(float(total_target) * 1.10f);
+        // Playerbot.Population.SpawnCapFactor: a pool that does not fit the level / faction buckets (only Horde, too few level 60s)
+        // can only be completed by creating more characters
+        const uint32 spawn_cap = uint32(float(total_target) * cfg.population_spawn_cap_factor());
         const uint32 marked    = pool_marked_count_;
         if (marked >= spawn_cap)
         {
@@ -3880,6 +3963,20 @@ bool BotPopulationManager::AmbientFleetEnabled()
 
 std::string BotPopulationManager::WorldReport() const { return world_spawner_->Report(); }
 WorldLoadFacts BotPopulationManager::WorldLoad() const { return world_spawner_ ? world_spawner_->Load() : WorldLoadFacts{}; }
+void BotPopulationManager::SetWorldPopulation(int level)
+{
+    if (!world_spawner_) return;
+    if (level < 0 || level > 3) world_spawner_->SetPopulation(std::nullopt);
+    else world_spawner_->SetPopulation(PopLevel(level));
+}
+int BotPopulationManager::WorldPopulation() const
+{
+    if (!world_spawner_) return -1;
+    std::optional<PopLevel> const p = world_spawner_->Population();
+    return p ? int(*p) : -1;
+}
+std::string BotPopulationManager::WorldPopulationLine() const { return world_spawner_ ? world_spawner_->PopulationLine() : std::string(); }
+bool BotPopulationManager::WorldPopulationDraining() const { return world_spawner_ && world_spawner_->PopulationDraining(); }
 bool BotPopulationManager::WorldSpawnerPending(uint64 guid_low) const { return world_spawner_->IsPending(guid_low); }
 
 bool BotPopulationManager::IsWorldPlaced(BotId id) const { return world_spawner_ && world_spawner_->IsPlaced(uint64(id)); }
@@ -4753,6 +4850,20 @@ void BotPopulationManager::DriveBgSoak(uint32 now_ms)
         st.first_in_bg_ms = now_ms;
     if (bg)
         st.last_status = uint8(bg->GetStatus());
+    // Who won, once per soak, when the match is over (AV 270 ended on reinforcements and the soak log had no word of the winner).
+    // AV: the reinforcements left (world states 3127 / 3128); the classic AV script's own [av_end] line in Server.log has the cause
+    // and the end honor.
+    if (bg && bg->GetStatus() == STATUS_WAIT_LEAVE && !st.end_logged)
+    {
+        st.end_logged = true;
+        PvPTeamId const w = bg->GetWinner();
+        Map const* m = bg->GetBgMap();
+        bool const av = m && m->GetId() == 30;
+        TC_LOG_INFO("playerbot.v2", "[bgsoak] match over bg_type={} winner={} after={}s reinforcements alliance={} horde={}", st.bg_type,
+                    w == PVP_TEAM_ALLIANCE ? "Alliance" : w == PVP_TEAM_HORDE ? "Horde" : "none",
+                    uint32(std::chrono::duration_cast<Seconds>(bg->GetInProgressDuration()).count()),
+                    av ? m->GetWorldStateValue(3127) : -1, av ? m->GetWorldStateValue(3128) : -1);
+    }
 
     if (int32(now_ms - st.last_log_ms) >= 60000)
     {
@@ -4854,16 +4965,9 @@ void BotPopulationManager::SeedBgMatches(uint32 now_ms)
     // Count active bot-relevant BG instances (any status) — same enumeration
     // TopUpActiveBGs uses. Seed only when below the cap.
     int32 active = 0;
-    {
-        std::unordered_set<uint32> seen_maps;
-        for (BattlemasterListXMapEntry const* xmap : sBattlemasterListXMapStore)
-        {
-            if (!xmap || xmap->MapID <= 0) continue;
-            if (!seen_maps.insert(uint32(xmap->MapID)).second) continue;
-            for (Battleground* bg : sBattlegroundMgr->GetBGFreeSlotQueueStore(uint32(xmap->MapID)))
-                if (bg) ++active;
-        }
-    }
+    for (auto const& [_, free_slot_store] : sBattlegroundMgr->GetBGFreeSlotQueues())
+        for (Battleground* bg : free_slot_store)
+            if (bg) ++active;
     if (active > 0)
         bg_seed_match_seen_ = true;   // current type produced a match — rotate next cycle
     if (active >= matches_cap) return;
@@ -5165,23 +5269,14 @@ void BotPopulationManager::TopUpActiveBGs(uint32 now_ms)
     if (prep_due)    last_bg_topup_ms_         = now_ms;
     if (running_due) last_bg_running_topup_ms_ = now_ms;
 
-    // Walk BattlemasterListXMap (BattlemasterListID → MapID) → per-map
-    // free-slot queue. The free-slot queue contains BG instances that
-    // still have capacity (TC's existing FreeSlotQueue mechanism). For
-    // each BG below max population in prep OR running, re-issue
-    // BotQueueFiller::Fill. Newly-queued bots are auto-pulled into the
-    // BG by AddToBGFreeSlotQueue when the next queue cycle runs.
-    // Dedup by map_id so we don't process the same map's free-slot store
-    // multiple times when several BattlemasterLists share a map.
-    std::unordered_set<uint32> seen_maps;
-    for (BattlemasterListXMapEntry const* xmap : sBattlemasterListXMapStore)
+    // Walk every queue's free-slot list. It holds the BG instances that
+    // still have capacity (TC's existing FreeSlotQueue mechanism), each
+    // in exactly one queue's list. For each BG below max population in
+    // prep OR running, re-issue BotQueueFiller::Fill. Newly-queued bots
+    // are auto-pulled into the BG by AddToBGFreeSlotQueue when the next
+    // queue cycle runs.
+    for (auto const& [_, free_slot_store] : sBattlegroundMgr->GetBGFreeSlotQueues())
     {
-        if (!xmap) continue;
-        if (xmap->MapID <= 0) continue;
-        uint32 map_id = uint32(xmap->MapID);
-        if (!seen_maps.insert(map_id).second) continue;
-
-        auto& free_slot_store = sBattlegroundMgr->GetBGFreeSlotQueueStore(map_id);
         for (Battleground* bg : free_slot_store)
         {
             if (!bg) continue;
@@ -5276,7 +5371,7 @@ void BotPopulationManager::TopUpActiveBGs(uint32 now_ms)
                 req.instance_id = uint32(bg->GetTypeID());
                 req.requesting_player = nullptr;
                 req.online_only = !allow_jit;
-                req.max_total_bots = uint8(Battleground::TopUpAfterInFlight(alli, max_per_team, BotQueueFiller::JitInFlight(uint32(bg->GetTypeID()), true, now_ms)));
+                req.max_total_bots = uint8(Battleground::TopUpAfterInFlight(alli, max_per_team, BotQueueFiller::JitInFlight(uint32(bg->GetTypeID()), true)));
                 req.single_faction = true;
                 if (target_level_for_bracket > 0)
                     req.target_level_override = target_level_for_bracket;
@@ -5297,7 +5392,7 @@ void BotPopulationManager::TopUpActiveBGs(uint32 now_ms)
                 req.instance_id = uint32(bg->GetTypeID());
                 req.requesting_player = nullptr;
                 req.online_only = !allow_jit;
-                req.max_total_bots = uint8(Battleground::TopUpAfterInFlight(horde, max_per_team, BotQueueFiller::JitInFlight(uint32(bg->GetTypeID()), false, now_ms)));
+                req.max_total_bots = uint8(Battleground::TopUpAfterInFlight(horde, max_per_team, BotQueueFiller::JitInFlight(uint32(bg->GetTypeID()), false)));
                 req.single_faction = true;
                 if (target_level_for_bracket > 0)
                     req.target_level_override = target_level_for_bracket;

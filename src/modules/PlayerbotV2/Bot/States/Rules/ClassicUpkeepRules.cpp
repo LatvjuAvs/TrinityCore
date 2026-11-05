@@ -153,6 +153,12 @@ bool SkipRecent(void const* ctx, uint64 key)
 constexpr int32 kBuffMinManaPct   = 45;
 constexpr int32 kBuffDrinkDonePct = 95;
 
+// Eating or drinking: the conjures (3 s hard casts) wait for the meal to end instead of standing the bot up (Thorium Point 2026-10-29).
+bool Resting(BotSnapshotView const& s)
+{
+    return Classic::IsEating(s) || Classic::IsDrinking(s);
+}
+
 bool BuffManaOk(BotSnapshotView const& s)
 {
     if (s.max_power(0) <= 0)
@@ -404,7 +410,7 @@ bool SoulstoneFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&
 
 bool HealthstoneGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const& g, uint32 now_ms)
 {
-    if (!s.is_in_instance() || !UpkeepWindow(s, g) || s.is_moving() || s.recently_in_combat(5000))
+    if (!s.is_in_instance() || !UpkeepWindow(s, g) || s.is_moving() || s.recently_in_combat(5000) || Resting(s))
         return false;
     uint32 const create = Classic::CreateHealthstoneSpell(s);
     return create && s.is_ready(create) && !Classic::HasHealthstone(s)
@@ -466,7 +472,8 @@ bool GemNoteCast(uint64 bot, uint32 now_ms)
 
 bool ManaGemGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const& g, uint32 now_ms)
 {
-    if (!s.is_in_instance() || !UpkeepWindow(s, g) || s.is_moving() || s.is_casting() || s.recently_in_combat(5000))
+    if (!s.is_in_instance() || !UpkeepWindow(s, g) || s.is_moving() || s.is_casting() || s.recently_in_combat(5000) || Resting(s)
+        || V2::MageConjureWaitsForMana(s.power_pct(POWER_MANA)))
         return false;
     uint32 const create = Classic::CreateManaGemSpell(s);
     if (!create)
@@ -504,6 +511,8 @@ constexpr uint32 kConjureFoodBelow = 10;
 
 uint32 PickConjure(BotSnapshotView const& s, BotAI& ai, uint32 now_ms)
 {
+    if (V2::MageConjureWaitsForMana(s.power_pct(POWER_MANA)))
+        return 0;
     for (auto kind : { Classic::ConsumableKind::Drink, Classic::ConsumableKind::Food })
     {
         uint32 const create = Classic::MageConjureSpell(s, kind, kind == Classic::ConsumableKind::Drink ? kConjureWaterBelow : kConjureFoodBelow);
@@ -516,7 +525,7 @@ uint32 PickConjure(BotSnapshotView const& s, BotAI& ai, uint32 now_ms)
 }
 bool ConjureGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const& g, uint32 now_ms)
 {
-    if (s.cls() != CLASS_MAGE || !s.is_in_instance() || !UpkeepWindow(s, g) || s.is_moving() || s.recently_in_combat(5000))
+    if (s.cls() != CLASS_MAGE || !s.is_in_instance() || !UpkeepWindow(s, g) || s.is_moving() || s.recently_in_combat(5000) || Resting(s))
         return false;
     return PickConjure(s, ai, now_ms) != 0;
 }

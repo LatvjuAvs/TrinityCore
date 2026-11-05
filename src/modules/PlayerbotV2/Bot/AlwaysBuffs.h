@@ -137,4 +137,12 @@ constexpr std::span<AlwaysAura const> AlwaysBuffRoleRows(BuffSet set)
 // name check failed), the temporary enchantment id for a Stone row (empty = none). Bot/ClassicUpkeep.cpp.
 std::span<uint32 const> AlwaysAuraEffects(AlwaysAura const& row);
 
+class BotSnapshotView;
+class GroupSnapshotView;
+
+// The role's set and the kinds on where the bot stands, as idle:always_buff gives them to the AlwaysBuffIntent.
+// Bot/States/Rules/OocConsumableRules.cpp.
+BuffSet AlwaysBuffSetOf(BotSnapshotView const& s, GroupSnapshotView const& g);
+uint8 AlwaysMask(BotSnapshotView const& s, GroupSnapshotView const& g);
+
 } // namespace Playerbot

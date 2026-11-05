@@ -20,7 +20,9 @@ class Player;
 class Unit;
 class Aura;
 class Group;
+class Channel;
 struct Position;
+struct BattlegroundTemplate;
 
 namespace Playerbot { class SnapshotBuildPool; struct GroupSnapshot; }
 
@@ -44,6 +46,7 @@ public:
     // their use cases (see PlayerbotV2.cpp comments for rationale).
     void OnPlayerLogin(Player* p);
     void OnPlayerLogout(Player* p);
+    void OnPlayerDeleted(uint64 guid_low);
     void OnLevelUp(Player* p, uint8 new_level);
     void OnDeath(Unit* victim, Unit* killer);
     void OnResurrect(Player* p);
@@ -61,7 +64,8 @@ public:
     void OnGroupMemberJoined(Group* g, Player* p);
     void OnGroupMemberLeft(Group* g, Player* p);
     void OnWhisperReceived(Player* sender, Player* receiver, std::string const& msg);
-    void OnPartyChat(Player* sender, Group* group, std::string const& msg);
+    // raid_chat: the line was said in raid chat (a chat-model answer goes back to raid chat; party chat stays in the subgroup).
+    void OnPartyChat(Player* sender, Group* group, std::string const& msg, bool raid_chat = false);
     // A bot order sent by the ForeverBots panel as an addon message (fixed prefix, party/raid): same parser as party chat.
     void OnAddonOrder(Player* sender, Group* group, std::string const& prefix, std::string const& text);
     void OnAddonWhisper(Player* sender, Player* receiver, std::string const& prefix, std::string const& text);
@@ -85,6 +89,8 @@ public:
     // SC-P1a: /say and /yell social reactions. Route to BotChatReactor's
     // range-gated say/yell paths so a single nearby bot can answer.
     void OnSayChat(Player* sender, std::string const& msg);
+    // A real player wrote in General, Trade or LookingForGroup: world bots may answer (Bot/ChannelChat.h).
+    void OnChannelChat(Player* sender, Channel* channel, std::string const& msg);
     void OnYellChat(Player* sender, std::string const& msg);
     // SC-P2c: reciprocate a nearby player's text emote (/wave, /salute, ...).
     void OnTextEmote(Player* sender, uint32 emote_id, uint32 text_emote_id, ObjectGuid target);
@@ -104,6 +110,8 @@ public:
     // core when a Player joins a BG / LFG queue; we hand off to
     // BotQueueFiller to invite online + JIT-spawn missing roles.
     void OnPlayerJoinedBgQueue(Player* player, uint32 bg_type_id, uint8 bracket);
+    // arena (2v2 / 3v3) queue of a real party: asks BotGroupBuilder for an opposing bot team
+    void OnHumanArenaQueue(Player* player, BattlegroundTemplate const* tmpl, uint8 bracket);
     void OnPlayerJoinedLfg(Player* player, uint32 dungeon_id, uint8 role_mask);
     bool HoldNewBattleground(uint32 bg_type_id, uint8 bracket);
 

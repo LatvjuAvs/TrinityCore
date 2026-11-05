@@ -887,6 +887,20 @@ bool QuestPursueGoalFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView 
     const float dx = poi.x - bx, dy = poi.y - by;
     const float dist = std::sqrt(dx * dx + dy * dy);
     if (dist < 1.0f) return false;
+    // Moving all the while, never closer (Bot/IdleWatch.h GoalProgress): the goal cannot be walked to from here. Give the objective up
+    // for 10 minutes so the picker takes another, the answer the idle watch gives a bot that stands still before a goal it cannot close.
+    {
+        uint64 const gkey = (uint64(poi.map_id) << 48) ^ (uint64(uint32(int32(std::floor(poi.x / 10.0f))) & 0xFFFFFFu) << 24)
+                          ^ uint64(uint32(int32(std::floor(poi.y / 10.0f))) & 0xFFFFFFu);
+        if (V2::GoalStalled(ai.goal_progress(), gkey, dist, now_ms))
+        {
+            ai.blacklist_current_objective(now_ms + 10u * 60u * 1000u);
+            TC_LOG_INFO("playerbot.v2", "[pursue_stall] {} lvl={} zone={} walked {} s toward ({:.0f},{:.0f}) on map {} without getting {:.0f} y closer ({:.0f} y left): objective given up for 10 minutes",
+                        s.name(), uint32(s.level()), s.zone_id(), V2::kGoalProgressMs / 1000u, poi.x, poi.y, poi.map_id, V2::kGoalProgressYards, dist);
+            ai.set_last_rule_fired("idle:pursue_quest_goal_stall");
+            return false;
+        }
+    }
     // A place that has just killed several bots (DeathHotspots) is off limits for a bot well below the killers' level:
     // blacklist the objective for 20 minutes so the picker takes another quest.
     if (::Playerbot::DeathHotspots::Instance().Dangerous(poi.map_id, poi.x, poi.y, uint8(s.level()),
@@ -965,7 +979,7 @@ bool QuestPursueGoalFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView 
 // Side effect only: the rule never claims the tick. Playerbot.World.QuestSiteCap (default 5, 0 = off).
 bool QuestSiteShareGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, uint32)
 {
-    static uint32 const cap = uint32(std::max<int32>(0, sConfigMgr->GetIntDefault("Playerbot.World.QuestSiteCap", int32(V2::Fleet::kQuestSiteCapDefault))));
+    static uint32 const cap = uint32(std::max<int32>(0, sConfigMgr->GetIntDefault("Playerbot.World.QuestSiteCap", int32(V2::Fleet::kQuestSiteCapDefault), true)));
     if (cap == 0) return false;
     if (s.has_owner_character() || s.in_group() || s.is_in_instance() || s.is_in_dungeon() || s.in_battleground()) return false;
     auto const& poi = s.current_objective_poi();
@@ -976,7 +990,7 @@ bool QuestSiteShareGate(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView c
 
 bool QuestSiteShareFire(BotSnapshotView const& s, BotAI& ai, GroupSnapshotView const&, BotIntentEmitter&, uint32 now_ms)
 {
-    uint32 const cap = uint32(std::max<int32>(0, sConfigMgr->GetIntDefault("Playerbot.World.QuestSiteCap", int32(V2::Fleet::kQuestSiteCapDefault))));
+    uint32 const cap = uint32(std::max<int32>(0, sConfigMgr->GetIntDefault("Playerbot.World.QuestSiteCap", int32(V2::Fleet::kQuestSiteCapDefault), true)));
     float bx, by, bz; s.position(bx, by, bz);
     std::vector<V2::Fleet::SiteWorker> near;
     for (auto const& u : s.raw().combat.nearby_friends)

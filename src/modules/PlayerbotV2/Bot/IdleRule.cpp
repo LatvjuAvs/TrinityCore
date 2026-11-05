@@ -48,7 +48,7 @@ bool IsWorldErrand(std::string_view name)
         "idle:pet_swap_from_stable", "idle:pursue_quest_", "idle:pvp_help_callout", "idle:assist_friend_pvp",
         "idle:quest_", "idle:react_to_passerby", "idle:resolve_junk_quests", "idle:swim_stuck_hearth",
         "idle:swim_stuck_walk_to_hub", "idle:tame_beast", "idle:taxi_discover", "idle:transport_ride", "idle:vendor_visit",
-        "idle:bag_hearth", "idle:fidget", "idle:inn_rest", "idle:mailbox", "idle:town_duel", "idle:wander",
+        "idle:bag_hearth", "idle:fidget", "idle:inn_rest", "idle:mailbox", "idle:town_duel", "idle:town_errand", "idle:town_linger", "idle:wander",
         "idle:walk_",
         "idle:wq_", "idle:yell_lfg", "idle:ambient_sit", "idle:rpg_",
     };

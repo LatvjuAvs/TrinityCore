@@ -11,6 +11,7 @@
 #include "BotTypes.h"
 #include "FlatIndex.h"
 #include "ObjectGuid.h"
+#include "OwnerPicks.h"
 #include "Raid/RaidOrder.h"
 #include "Quest/CompanionQuest.h"   // CompanionQuestState (companion_quest)
 #include <algorithm>
@@ -317,6 +318,11 @@ struct NearbyUnit
     // units (attackers + nearby_enemies). Keeps a bear's Bash out of the
     // interrupt rotation on such a mob (Combat/Apl/ApInterrupt.h).
     bool       stun_immune = false;
+    // The unit is immune to the warrior's Rend right now (bleed mechanic
+    // immunity, probed with Rend rank 1). Filled for warrior bots only, on the
+    // same units as stun_immune. Keeps Rend from being recast every GCD on a
+    // mob that never takes it.
+    bool       bleed_immune = false;
     Role       role = Role::Unknown;
     ObjectGuid victim;          // Who this unit is currently attacking (Empty if none).
     // For Creature units: lower 32 bits of UNIT_NPC_FLAG_* (vendor/repair/
@@ -358,6 +364,10 @@ struct NearbyUnit
     // The creature is running away (a low-health mob fleeing for help, or feared): its motion is Fleeing, Timed fleeing or
     // Assistance. Melee do not chase it out of the group.
     bool       is_fleeing = false;
+    // Of those, the one running for help (Assistance motion: Creature::DoFleeToGetAssistance, a creature's flee-for-assist script
+    // action). It runs to the nearest friend within CreatureFamilyFleeAssistanceRadius and calls assistance there, which brings
+    // that friend's pack (SM 2026-10-30: Scarlet mobs flee at 15 % and turned 2-3 mob pulls into 8). A feared mob is not one.
+    bool       seeks_help = false;
     // UNIT_FLAG_UNINTERACTIBLE (0x02000000, the old NOT_SELECTABLE): players
     // cannot select/target the unit, and Unit::IsValidAttackTarget rejects it —
     // so a bot can NEVER acquire it as a victim. Invisible "stalker" / trigger
@@ -765,6 +775,32 @@ struct PveOrder
         return dx * dx + dy * dy > stay_near_r * stay_near_r;
     }
 
+    // The bot main tank runs a pull back (BotAI::PullBackPlan) and is out at its opener or on its way back: the pack is coming to
+    // (tank_pull_x, tank_pull_y, tank_pull_z), its return point. The others wait there and leave the pack alone until it arrives.
+    bool       tank_pulling_back = false;
+    float      tank_pull_x = 0.0f;
+    float      tank_pull_y = 0.0f;
+    float      tank_pull_z = 0.0f;
+
+    // Line-of-sight pull (PveGroupCoordinator::PlanSightPull, dungeons): mobs of the pull stand off and shoot or cast from where
+    // they stood (a Scarlet Beastmaster, an Adept) instead of following the tank back. The group gathers at (sight_x, sight_y,
+    // sight_z), a spot by the tank's return point out of those mobs' sight, so they have to walk in; nobody walks out to them.
+    // sight_mobs: the mobs still standing off (one leaves the list once it is within reach of the spot).
+    static constexpr size_t kMaxSightMobs = 4;
+    bool       sight_pull = false;
+    float      sight_x = 0.0f;
+    float      sight_y = 0.0f;
+    float      sight_z = 0.0f;
+    std::array<ObjectGuid, kMaxSightMobs> sight_mobs{};
+
+    bool sight_pull_mob(ObjectGuid g) const
+    {
+        if (!sight_pull || g.IsEmpty()) return false;
+        for (ObjectGuid const& m : sight_mobs)
+            if (m == g) return true;
+        return false;
+    }
+
     void reset() { *this = PveOrder{}; }
 };
 
@@ -801,6 +837,7 @@ struct VitalsState
     // PvP context flags.
     bool is_pvp        = false;
     bool is_ffa_pvp    = false;
+    bool pvp_wanted    = false;   // the explicit PvP flag (PLAYER_FLAGS_IN_PVP, the PvP button) is on
     bool is_sanctuary  = false;
 
     // Pure-POD (fixed arrays + scalars): default-assign is allocation-free.
@@ -1376,6 +1413,9 @@ struct CombatTargetsState
     // The bot's group is a raid group (wherever it stands). A raid in the open world (a world boss, the support scorecard) plays by the raid
     // rules the instance maps get: threat discipline and the healers' mana-efficiency rules.
     bool                    raid_group = false;
+    // The bot's own chase (MoveChase) failed to build a path to this unit twice in a row (ChaseMovementGenerator::GetNoPathStreak).
+    // Empty otherwise. BotAI::update drops it as a target for a while (BotAI::chase_unreachable).
+    ObjectGuid              chase_nopath_target;
     // Hostile ground-effect zones around the bot (see GroundHazard).
     std::vector<GroundHazard> ground_hazards;
     // LoS to each live same-map group tank (see TankLos).
@@ -1388,6 +1428,7 @@ struct CombatTargetsState
         group_tank = ObjectGuid::Empty;
         big_raid = false;
         raid_group = false;
+        chase_nopath_target = ObjectGuid::Empty;
         victim = ObjectGuid::Empty;
         current_target = ObjectGuid::Empty;
         current_target_hostile = false;
@@ -1551,6 +1592,7 @@ struct InstanceContextState
     bool   is_in_dungeon  = false;
     bool   is_in_raid     = false;
     uint32 map_difficulty = 0;
+    uint32 max_players    = 0;      // the instance's player cap (InstanceMap::GetMaxPlayers); 0 outside instances
 
     void reset() { *this = InstanceContextState{}; }
 };
@@ -2072,6 +2114,9 @@ struct SpellbookState
     // (Overpower before a dodge, Revenge before a block, Execute above 20%).
     // Sorted ascending; BotSnapshotView::is_ready treats them as not ready.
     std::vector<uint32> aura_state_blocked;
+    // Known spells whose maximum range the bot's spell modifiers change (Flame Throwing, Arctic Reach, Grim Reach ...): the yards they add,
+    // sorted by spell id. Spell::CalcMinMaxRange applies SpellModOp::Range; a range read from the spell data alone missed it.
+    std::vector<std::pair<uint32, float>> range_bonus;
     bool                is_starter_build = false;
 
     void reset()
@@ -2081,6 +2126,7 @@ struct SpellbookState
         active_talents.clear();
         active_glyphs.clear();
         aura_state_blocked.clear();
+        range_bonus.clear();
         is_starter_build = false;
     }
 };
@@ -2694,6 +2740,30 @@ struct BotSnapshot
     // Owner "max dps" / "save mana" (BotAI::tactic_burn / tactic_save_mana), mirrored by the builder.
     bool tactic_burn = false;
     bool tactic_save_mana = false;
+    // The CcDeny kinds (CcDeny.h) this bot leaves out by its owner's order ("@warlock no fear", "off cc"), resolved by the builder
+    // from OwnerRegistry::CcDenied for the account that commands the bot. The emitter drops such a cast; MarkCc skips it.
+    uint16 cc_deny = 0;
+    // The owner's spell picks for this bot ("prefer blessing might", "pet off", "stealth off"; OwnerPicks.h), mirrored from
+    // BotAI::owner_picks by the builder. Read by the Classic upkeep picks and rotations.
+    OwnerPicks::Picks owner_picks;
+    // The owner's "aoe off" (BotAI::aoe_denied, AoeDeny.h), mirrored by the builder: the emitter drops a spell that hits more than
+    // one enemy.
+    bool aoe_denied = false;
+    // The owner's "focus heal <name>, <name>" (BotAI::heal_only), mirrored by the builder: when not empty the bot heals only these
+    // players and itself. PickPatient keeps to them; the emitter drops any other friendly heal (the tank shield / Renew rules too).
+    std::vector<ObjectGuid> heal_only;
+    // The owner's full Passive (BotAI::OwnerStance::NoFight, the panel's Passive), mirrored by the builder: the emitter drops every
+    // attack and harmful spell, and the builder empties combat.attackers / nearby_enemies, so no rule picks a target or walks to one.
+    // Heals, buffs and other friendly spells still go.
+    bool no_fight = false;
+    // The owner's "ignore target" list (OwnerRegistry::FightIgnored, the panel's Ignore target button): mobs this bot must not attack,
+    // not even when they attack the owner or the bot (a rare beast the hunter player tames). The builder takes them out of
+    // combat.attackers / nearby_enemies; the emitter drops an attack or harmful spell at one; State_InCombat calls the bot and its pet
+    // off one. Other mobs are fought as usual. fight_ignore_near: one of them is within kFightIgnoreAoeYd of the bot, so no spell that
+    // hits more than one enemy goes out either.
+    std::vector<ObjectGuid> fight_ignore;
+    bool fight_ignore_near = false;
+    static constexpr float kFightIgnoreAoeYd = 30.0f;
     // (duel + quest-share + trade + summon migrated into social_events above)
     // LFG queue / role-check / proposal / vote-kick state — REFACTOR_2
     // sub-struct rollout. See LfgState above for per-field semantics.
@@ -2977,6 +3047,12 @@ struct BotSnapshot
         owner_dist = -1.0f;
         tactic_burn = false;
         tactic_save_mana = false;
+        cc_deny = 0;
+        owner_picks = {};
+        aoe_denied = false;
+        no_fight = false;
+        fight_ignore.clear();
+        fight_ignore_near = false;
 
         // Sub-structs (declaration order).
         identity.reset();

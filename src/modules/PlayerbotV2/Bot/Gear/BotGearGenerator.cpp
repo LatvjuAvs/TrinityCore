@@ -12,6 +12,7 @@
 #include "Log.h"
 #include "World.h"
 #include "Config.h"
+#include "DatabaseEnv.h"         // the holiday loot conditions (Bots.HolidayClothes)
 #include "../BotSnapshot.h"          // PlanEquipOrder
 #include "../../Services.h"          // Services::Config(): Playerbot.Behavior.TankRangedWeapon
 #include "../../Fleet/OwnerRegistry.h"
@@ -29,6 +30,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -244,8 +246,39 @@ uint16 TargetIlvlForLevel(uint8 level)
     return uint16((uint32(level) * kTwwIlvl) / kTwwCap);
 }
 
+// Bots.HolidayClothes = 0 (the player's file): bots wear no holiday items, such as the Red and Green Winter Hats that some
+// bosses drop only during Winter Veil. A holiday item is one the item data ties to a holiday, one whose loot rows drop it only
+// while a holiday event runs (conditions type 12 on a game_event with a holiday), or one a vendor sells only during a holiday.
+// Read once, at the first gear look-up after start; a change needs a restart. 1 (default) keeps today's behaviour.
+static std::unordered_set<uint32> const* HolidayClothesToSkip()
+{
+    static std::unordered_set<uint32> const* const s_items = []() -> std::unordered_set<uint32> const*
+    {
+        if (sConfigMgr->GetBoolDefault("Bots.HolidayClothes", true, true))
+            return nullptr;
+        auto* items = new std::unordered_set<uint32>();
+        for (auto const& [entry, tpl] : sObjectMgr->GetItemTemplateStore())
+            if (tpl.GetHolidayID() != HOLIDAY_NONE)
+                items->insert(entry);
+        // condition source types 1-12 are the loot tables; their SourceEntry is the item
+        if (QueryResult r = WorldDatabase.Query("SELECT DISTINCT c.SourceEntry FROM conditions c JOIN game_event e ON e.eventEntry = c.ConditionValue1 "
+                                                "WHERE c.SourceTypeOrReferenceId BETWEEN 1 AND 12 AND c.ConditionTypeOrReference = 12 "
+                                                "AND c.NegativeCondition = 0 AND e.holiday <> 0"))
+            do items->insert((*r)[0].GetUInt32()); while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT DISTINCT v.item FROM game_event_npc_vendor v JOIN game_event e ON e.eventEntry = v.eventEntry "
+                                                "WHERE e.holiday <> 0 AND v.type = 1"))
+            do items->insert((*r)[0].GetUInt32()); while (r->NextRow());
+        TC_LOG_INFO("playerbot.v2", "[BotGearGenerator] Bots.HolidayClothes = 0: bots wear none of {} holiday items", items->size());
+        return items;
+    }();
+    return s_items;
+}
+
 bool IsBotWearableItemId(uint32 entry)
 {
+    if (std::unordered_set<uint32> const* holiday = HolidayClothesToSkip(); holiday && holiday->count(entry))
+        return false;
+
     constexpr uint32 kClassicCap = 60, kFirstNonVanillaItemId = 25000;
     if (MaxPlayerLevel() > kClassicCap)
         return true;
@@ -1368,7 +1401,7 @@ std::vector<SourcedGearPick> const& SourcedTierGear(uint8 cls, uint16 spec, Owne
 }
 
 // The hybrids' tier sets (Cenarion / Stormrage / Dreamwalker, Lawbringer / Judgement / Redemption, Prophecy / Transcendence / Faith, Earthfury /
-// Ten Storms / Earthshatter) are built for the healer. A damage spec of those classes (balance and cat druid, retribution paladin, shadow priest,
+// Ten Storms / Earthshatterer) are built for the healer. A damage spec of those classes (balance and cat druid, retribution paladin, shadow priest,
 // elemental and enhancement shaman) wears the picks of its own role under the tier's item level ceiling instead: damage_parity 147 gave a balance
 // druid 168 spell power at Tier 3 against 268 at Tier 1.
 bool TierSetIsHealerSet(uint8 cls, uint16 spec)

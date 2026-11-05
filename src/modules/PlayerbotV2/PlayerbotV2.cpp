@@ -19,7 +19,10 @@
 #include "Bot/World/NavmeshPrewarm.h"
 #include "Bot/World/ZonePicker.h"
 #include "PlayerbotMovement.h"
+#include "Session/AddonControl.h"
 #include "Session/BotSessionMgr.h"
+#include "Session/HumanLogin.h"
+#include "Fleet/BotAccountMgr.h"
 #include "Fleet/BotCharacterFactory.h"
 #include "Fleet/BotNamePool.h"
 #include "Fleet/BotPopulationManager.h"
@@ -47,8 +50,11 @@
 #include "Bot/BotArchetype.h"
 #include "Bot/BotRng.h"
 #include "Bot/BotCommandParser.h"
+#include "Bot/BotChatModel.h"
 #include "Bot/BotChatReactor.h"
+#include "Bot/ChannelChat.h"
 #include "Bot/GroupOrderText.h"
+#include "Bot/CcDeny.h"
 #include "Util.h"
 #include "Bot/AddonHint.h"
 #include "Bot/BotTextMgr.h"
@@ -61,6 +67,7 @@
 #include "SpellMgr.h"
 #include "Group/GroupSnapshotBuilder.h"
 #include "Group.h"
+#include "BotGroupRules.h"
 #include "GitRevision.h"
 #include <filesystem>
 #include <fstream>
@@ -70,6 +77,12 @@
 #include "PathGenerator.h"
 #include "Pet.h"
 #include "Fleet/PetSnap.h"
+#include "Fleet/OwnerCatchUp.h"
+#include "Fleet/OwnerTrail.h"
+#include "Diagnostics/ScenarioHuman.h"
+#include "Random.h"
+#include <functional>
+#include <unordered_set>
 #include "WorldSession.h"
 #include "Bot/BotCommandParser.h"
 #include "Threading/SnapshotPublisher.h"
@@ -202,6 +215,18 @@ void DriveTeleportAck(Player* p)
     if (p->GetTeleportState() == TeleportState::WaitingForWorldPortAck ||
         p->GetTeleportState() == TeleportState::WaitingForSuspendTokenResponse)
     {
+        // TeleportTo only deactivates the top movement generator (MotionMaster::InterruptOnTeleport); on the new map
+        // MotionMaster::Update resets it and a POINT/FOLLOW/CHASE generator re-splines toward its target on the OLD map. A bot
+        // set down in its levelling town walked toward it inside the Hall of Thanes, straight into the exit portal 13 y behind
+        // the entrance, before its throttled snapshot saw the map change and BotAI dropped the move (hot_faldrim, 2026-10-28:
+        // 3 of 5 back in Old Ironforge in the first second). Real clients drive their own movement, so this is bots only.
+        // A taxi flight keeps its generator: the worldport ack resumes it on the new map.
+        if (!p->IsInFlight())
+        {
+            p->StopMoving();
+            p->GetMotionMaster()->Clear();
+            p->GetMotionMaster()->MoveIdle();
+        }
         sess->HandleMoveWorldportAck();
         return;
     }
@@ -374,6 +399,13 @@ void SnapToGroundIfDrifted(Player* p)
     // avoids snapping bots off rooftops, towers, or mountain platforms.
     if (curZ > groundZ + kHighAboveCutoff)
     {
+        // The case above is a bot off the navmesh (no nearby poly, every path fails). A bot whose own position is on a walkable
+        // poly stands on a floor the height probe did not see (a hole in the collision model, a floor that is a game object):
+        // the probe answered with the terrain or water far below. b3ca0b4b67 hot_faldrim: the mage stood among the group on the
+        // floor of Faldrim's hall at z 500.8, the probe gave 0.0, and it was set down 500 y under the instance.
+        Position on_mesh;
+        if (BotMovement::NearestNavPoint(p, p->GetPositionX(), p->GetPositionY(), curZ, 1.5f, 3.0f, on_mesh))
+            return;
         TC_LOG_WARN("playerbot.v2",
             "[SnapToGroundIfDrifted] {} stuck high (Z={:.1f} vs ground={:.1f}); teleporting down",
             p->GetName(), curZ, groundZ);
@@ -674,16 +706,28 @@ void GlobalStuckRescue(Player* p, BotAI* ai)
 // generated threat only. World thread (post-barrier publish pass).
 // Non-tank bots of such a group (not in a battleground, inside a dungeon or raid map)
 // get Playerbot.DpsThreatMultiplier instead (Karrz's VMaNGOS 0.8: DPS pull less); 1.0 = off.
+// On a raid map a tank gets Playerbot.Raid.TankThreatMultiplier instead, and with Playerbot.Raid.SureTaunt its taunts never miss:
+// a raid boss's threat drops (Onyxia's and Broodlord's Knock Away, the BWL drakes' Wing Buffet) halve the tank, and x3 left a halved
+// tank below the DPS (bwl_broodlord 256: the boss on DPS and healers from 25 s on, 40 deaths). The scenario squads have no owner;
+// Playerbot.Scenario.OwnerThreat gives them the same multipliers, so a scenario tests what a player's raid gets.
+struct TankThreatSettings
+{
+    float tank = 3.0f, raid_tank = 5.0f, dps = 1.0f;
+    bool sure_taunt = true, scenario_as_owned = true;
+};
+
 void UpdateTankThreatMultiplier(BotId id, Player* p, BotAI const* ai,
-                                BotSnapshot const& snap, float tank_mult, float dps_mult)
+                                BotSnapshot const& snap, TankThreatSettings const& cfg)
 {
     if (!p)
         return;
     float want = 1.0f;
+    bool sure_taunt = false;
     std::string duty = "none";
+    bool const owned = Services::Owners().GetOwner(id).account_id != 0 || (cfg.scenario_as_owned && Pool::IsScenarioBot(id));
     // Not in a battleground: no tank duty there, and the threat it multiplied would only be an NPC's (AV).
-    if ((tank_mult != 1.0f || dps_mult != 1.0f) && p->GetGroup() && !snap.bg.in_battleground &&
-        Services::Owners().GetOwner(id).account_id != 0)
+    if ((cfg.tank != 1.0f || cfg.raid_tank != 1.0f || cfg.dps != 1.0f || cfg.sure_taunt) && p->GetGroup() &&
+        !snap.bg.in_battleground && owned)
     {
         PveOrder const& po = snap.pve_order;
         bool tank = false;
@@ -699,16 +743,21 @@ void UpdateTankThreatMultiplier(BotId id, Player* p, BotAI const* ai,
             duty = tank ? "role-tank" : "none";
         }
         if (tank)
-            want = tank_mult;
-        else if (dps_mult != 1.0f && (snap.instance_ctx.is_in_dungeon || snap.instance_ctx.is_in_raid))
-            want = dps_mult;
+        {
+            want = snap.instance_ctx.is_in_raid ? cfg.raid_tank : cfg.tank;
+            sure_taunt = cfg.sure_taunt && snap.instance_ctx.is_in_raid;
+        }
+        else if (cfg.dps != 1.0f && (snap.instance_ctx.is_in_dungeon || snap.instance_ctx.is_in_raid))
+            want = cfg.dps;
     }
+    if (p->GetThreatManager().GetTauntNeverMisses() != sure_taunt)
+        p->GetThreatManager().SetTauntNeverMisses(sure_taunt);
     API api(p);
     if (api.threat_multiplier() == want)
         return;
     api.set_threat_multiplier(want);
-    TC_LOG_DEBUG("playerbot.v2", "[tank_threat] {} threat x{:.2f} (duty {})",
-                p->GetName(), want, duty);
+    TC_LOG_DEBUG("playerbot.v2", "[tank_threat] {} threat x{:.2f} (duty {}){}",
+                p->GetName(), want, duty, sure_taunt ? ", taunts never miss" : "");
 }
 
 // Bot cast pacing (Playerbot.Cast.*, OFF by default): when enabled, raid bots cast faster
@@ -860,7 +909,9 @@ void Module::Init()
             p->IsInWater(),
             p->InBattleground() || p->GetMap()->IsDungeon() || p->GetMap()->IsBattlegroundOrArena(),
             ::Playerbot::V2::World::VanillaZoneLevelRange(p->GetZoneId(), lo, hi),
-            p->GetGroup() != nullptr,
+            // A follower; the leader of a bot party picks the party's route and keeps out of the canals like a solo bot (live 244: a
+            // bot leader walked its party into the Stormwind canal on a quest route).
+            p->GetGroup() != nullptr && p->GetGroup()->GetLeaderGUID() != p->GetGUID(),
             Services::Owners().GetOwner(p->GetGUID().GetCounter()).account_id != 0);
     };
 
@@ -1093,6 +1144,9 @@ void Module::Shutdown()
     for (int pass = 0; pass < 10 && Services::SessionMgr().active_count() > 0; ++pass)
         Services::SessionMgr().Update(0);
 
+    // Stop the chat model's worker thread (cancels a request in flight).
+    BotChatModel::Shutdown();
+
     // Stop threads first; then tear down state.
     Services::Shutdown();
 
@@ -1144,6 +1198,440 @@ static void DrivePetSnap(uint32 now_ms)
             it = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(it->first)) ? std::next(it) : state.erase(it);
 }
 
+// The bots that go where a player goes (Fleet/OwnerCatchUp.h): his own companions, and every bot of a group he leads. Alive or not,
+// in the world, on any map.
+static void ForEachBotWithOwner(Player* owner, std::function<void(Player*)> const& fn)
+{
+    Group* group = owner->GetGroup();
+    if (!group)
+        return;
+    bool const leads = group->GetLeaderGUID() == owner->GetGUID();
+    uint64 const owner_low = owner->GetGUID().GetCounter();
+    for (GroupReference const& ref : group->GetMembers())
+    {
+        Player* m = ref.GetSource();
+        if (!m || m == owner || !m->IsInWorld() || !m->GetSession() || !m->GetSession()->IsBot() || ::Playerbot::Scenario::PlaysAsHuman(m))
+            continue;
+        if (!leads && Services::Owners().OwnerCharacter(m->GetGUID().GetCounter()) != owner_low)
+            continue;
+        fn(m);
+    }
+}
+
+// A player who takes a flight takes the bots by him along (Fleet/OwnerCatchUp.h, Playerbot.Behavior.FlyWithOwner): each boards the same
+// route a moment after him, and the ones that could not are brought to him when he lands. Runs on the world thread, before the maps update.
+static void DriveFlyWithOwner(uint32 now_ms)
+{
+    struct Boarding { uint64 bot_low; uint32 due_ms; };
+    struct Watch
+    {
+        bool flying = false;
+        std::vector<uint32> nodes;               // his route as he took off
+        std::vector<Boarding> boarding;          // bots about to board
+        std::vector<uint64> left_behind;         // bots brought to him when he lands
+    };
+    static std::unordered_map<uint64, Watch> watches;
+    static uint32 next_ms = 0;
+    if (int32(now_ms - next_ms) < 0)
+        return;
+    next_ms = now_ms + 100u;
+    if (!Services::Config().behavior_fly_with_owner())
+    {
+        watches.clear();
+        return;
+    }
+
+    auto bot_by_low = [](uint64 low) { return ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(low)); };
+    std::unordered_set<uint64> seen;
+    for (auto const& [guid, owner] : ObjectAccessor::GetPlayers())
+    {
+        if (!owner || !owner->IsInWorld() || !::Playerbot::Scenario::PlaysAsHuman(owner))
+            continue;
+        uint64 const owner_low = guid.GetCounter();
+        bool const flying = owner->IsInFlight() && owner->m_taxi.GetPath().size() >= 2;
+        auto it = watches.find(owner_low);
+        if (it == watches.end())
+        {
+            if (!flying)
+                continue;
+            it = watches.emplace(owner_low, Watch{}).first;
+        }
+        seen.insert(owner_low);
+        Watch& w = it->second;
+
+        if (flying && !w.flying)
+        {
+            // He took off: the bots by him board in a moment, the rest wait for him to land.
+            w.flying = true;
+            w.nodes.assign(owner->m_taxi.GetPath().begin(), owner->m_taxi.GetPath().end());
+            w.boarding.clear();
+            w.left_behind.clear();
+            uint32 boarders = 0;
+            ForEachBotWithOwner(owner, [&](Player* bot)
+            {
+                bool const same = bot->GetMap() == owner->GetMap();
+                float const dist = same ? bot->GetExactDist(owner) : -1.0f;
+                if (Fleet::FlyBoardEligible(bot->IsAlive(), bot->IsInCombat(), bot->IsInFlight(), bot->GetTransport() || bot->GetVehicle(),
+                                            same, dist))
+                {
+                    w.boarding.push_back({ bot->GetGUID().GetCounter(), now_ms + urand(Fleet::kFlyBoardDelayMinMs, Fleet::kFlyBoardDelayMaxMs) });
+                    ++boarders;
+                }
+                else
+                    w.left_behind.push_back(bot->GetGUID().GetCounter());
+            });
+            TC_LOG_INFO("playerbot.v2", "[fly_with_owner] {} takes off from taxi node {} to node {} ({} hops): {} bot(s) board, {} wait for the landing",
+                        owner->GetName(), w.nodes.front(), w.nodes.back(), uint32(w.nodes.size() - 1), boarders, uint32(w.left_behind.size()));
+        }
+
+        // Board the ones whose moment has come, from where they stand (a bot that started a fight or died meanwhile waits for the landing).
+        for (auto b = w.boarding.begin(); b != w.boarding.end();)
+        {
+            if (int32(now_ms - b->due_ms) < 0) { ++b; continue; }
+            Player* bot = bot_by_low(b->bot_low);
+            if (bot && bot->IsInWorld() && !bot->IsBeingTeleported() && bot->GetMap() == owner->GetMap() && bot->IsAlive() && !bot->IsInCombat() &&
+                !bot->IsInFlight() && !bot->GetTransport() && !bot->GetVehicle())
+            {
+                // Bots pay the fare like players; the flight reserve of API::fly_to_node keeps one from staying behind for want of it.
+                constexpr uint64 kFlightReserve = 50000;   // 5 gold in copper
+                if (bot->GetMoney() < kFlightReserve)
+                    bot->ModifyMoney(int64(kFlightReserve - bot->GetMoney()));
+                bot->StopMoving();
+                bot->GetMotionMaster()->Clear();
+                if (bot->ActivateTaxiPathTo(w.nodes, nullptr, 0, 0))
+                    TC_LOG_INFO("playerbot.v2", "[fly_with_owner] {} boards {}'s flight to node {}", bot->GetName(), owner->GetName(), w.nodes.back());
+                else
+                {
+                    TC_LOG_INFO("playerbot.v2", "[fly_with_owner] {} could not board {}'s flight (route {} -> {}): waits for the landing",
+                                bot->GetName(), owner->GetName(), w.nodes.front(), w.nodes.back());
+                    w.left_behind.push_back(b->bot_low);
+                }
+            }
+            else
+            {
+                if (bot)
+                    TC_LOG_INFO("playerbot.v2", "[fly_with_owner] {} did not board {}'s flight ({}): waits for the landing", bot->GetName(),
+                                owner->GetName(), !bot->IsAlive() ? "dead" : bot->IsInCombat() ? "in combat" : "moved off");
+                w.left_behind.push_back(b->bot_low);
+            }
+            b = w.boarding.erase(b);
+        }
+
+        if (!flying && w.flying)
+        {
+            // He landed (or the flight ended some other way): the ones left behind come to him, as his "summon" brings them.
+            for (Boarding const& b : w.boarding)
+                w.left_behind.push_back(b.bot_low);
+            for (uint64 low : w.left_behind)
+            {
+                Player* bot = bot_by_low(low);
+                if (!bot || !bot->IsInWorld() || bot->IsInFlight() || bot->GetGroup() != owner->GetGroup())
+                    continue;
+                if (bot->GetMap() == owner->GetMap() && bot->GetExactDist(owner) <= Fleet::kFlyBoardYards)
+                    continue;
+                if (std::string const why = Services::Population().BringToOwner(owner, bot, "flight landing"); why.empty())
+                    TC_LOG_INFO("playerbot.v2", "[fly_with_owner] {} brought to {} at the landing", bot->GetName(), owner->GetName());
+            }
+            watches.erase(it);
+            continue;
+        }
+    }
+    // Owners who logged out or left the world mid-flight.
+    for (auto it = watches.begin(); it != watches.end();)
+        it = seen.count(it->first) ? std::next(it) : watches.erase(it);
+}
+
+// A bot that cannot get any closer to the player it goes with while he is well away is set down beside him (Fleet/OwnerCatchUp.h,
+// Playerbot.Behavior.CatchUpToOwner), on his map or from any other, into a dungeon and out of one. Not in battlegrounds, not while a
+// dungeon run's autopilot moves it beside him, not on a stay / hold order, never in or out of a fight. Runs on the world thread.
+static std::unordered_map<uint64, uint32> g_catch_up_count;
+
+uint32_t Fleet::CatchUpCount(uint64_t bot_low)
+{
+    auto it = g_catch_up_count.find(bot_low);
+    return it == g_catch_up_count.end() ? 0u : it->second;
+}
+
+static void DriveOwnerCatchUp(uint32 now_ms)
+{
+    static std::unordered_map<uint64, Fleet::CatchUpState> state;
+    static uint32 next_ms = 0;
+    if (int32(now_ms - next_ms) < 0)
+        return;
+    next_ms = now_ms + 250u;
+    if (!Services::Config().behavior_catch_up_to_owner())
+    {
+        state.clear();
+        return;
+    }
+    uint32 const game_ms = GameTime::GetGameTimeMS();
+    for (auto const& [guid, owner] : ObjectAccessor::GetPlayers())
+    {
+        if (!owner || !owner->IsInWorld() || !::Playerbot::Scenario::PlaysAsHuman(owner) || !owner->GetGroup())
+            continue;
+        Map const* omap = owner->GetMap();
+        if (!omap || omap->IsBattlegroundOrArena())
+            continue;
+        // While he is in the air, on a ship, falling or being ported the place he will be is not known yet; a fight is his to call.
+        bool const owner_settled = owner->IsAlive() && !owner->HasPlayerFlag(PLAYER_FLAGS_GHOST) && !owner->IsInCombat() && !owner->IsInFlight() &&
+            !owner->GetTransport() && !owner->GetVehicle() && !owner->IsFalling() && !owner->IsBeingTeleported();
+        ForEachBotWithOwner(owner, [&](Player* bot)
+        {
+            uint64 const low = bot->GetGUID().GetCounter();
+            Fleet::CatchUpState& st = state[low];
+            if (!Fleet::CatchUpDue(st, now_ms))
+                return;
+            Map const* bmap = bot->GetMap();
+            bool const same = bmap == omap;
+            // Another map or another copy of his instance (a ship or zeppelin he took and the bot did not, a dungeon door it did not get
+            // to, a dungeon he left): no walk gets it there in time, so after the same 15 s it is set down by him like his summon would
+            // (BringToOwner takes the instance door checks). Never a battleground on its side.
+            bool const other_map = !same && bmap && !bmap->IsBattlegroundOrArena();
+            BotAI* ai = Services::Registry().ai(low);
+            bool const own_movement = ai && (ai->holding_position(game_ms) || ai->follow_drop_committed(game_ms) ||
+                (ai->is_manual_mode(game_ms) && (ai->owner_command() == BotAI::OwnerCommand::Engage || ai->owner_command() == BotAI::OwnerCommand::Action)) ||
+                (same && bmap->IsDungeon() && ai->dungeon_active()));
+            bool const eligible = owner_settled && (same || other_map) && !own_movement && bot->IsAlive() && !bot->IsInCombat() &&
+                !bot->IsInFlight() && !bot->GetTransport() && !bot->GetVehicle() && !bot->IsFalling() && !bot->IsBeingTeleported();
+            float const gap = same ? bot->GetExactDist(owner) : 0.0f;
+            float const dz = same ? bot->GetPositionZ() - owner->GetPositionZ() : 0.0f;
+            if (!Fleet::CatchUpUpdate(st, eligible, other_map, gap, dz, now_ms))
+                return;
+            TC_LOG_INFO("playerbot.v2", "[catch_up] {} has had no way closer to {} for {} s ({}): brought to him at ({:.0f},{:.0f},{:.0f}) map {}",
+                        bot->GetName(), owner->GetName(), Fleet::kCatchUpStrikes * Fleet::kCatchUpCheckMs / 1000u,
+                        other_map ? fmt::format("on map {}", bmap->GetId()) :
+                                    fmt::format("{:.0f} y away, {:.0f} y {} at ({:.0f},{:.0f},{:.0f})", gap, std::fabs(dz), dz < 0.f ? "below" : "above",
+                                                bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()),
+                        owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ(), omap->GetId());
+            if (Services::Population().BringToOwner(owner, bot, "catch up").empty())
+                ++g_catch_up_count[low];
+        });
+    }
+    if (state.size() > 2048u)
+        for (auto it = state.begin(); it != state.end();)
+            it = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(it->first)) ? std::next(it) : state.erase(it);
+}
+
+// The bots go the way their player went where the navmesh has none (Fleet/OwnerTrail.h, Playerbot.Behavior.FollowOwnerSteps): his last
+// steps and jumps are kept, and a bot of his group that has had no walking route to him for two looks while it stands on that way runs
+// it after him and makes his jumps (the chains up to Upper Blackrock Spire). One that falls off or cannot is the catch-up's after its
+// 15 s. Same gates as the catch-up. Runs on the world thread, before the maps update.
+static void DriveOwnerTrail(uint32 now_ms)
+{
+    struct Way { Fleet::OwnerTrail trail; uint32 map_id = 0; uint32 instance_id = 0; };
+    struct Walker
+    {
+        Fleet::TrailWalk walk;
+        uint32 next_step_ms = 0;     // the step it heads for, by its time stamp (the owner's deque drops steps at the front)
+        uint32 issued_step_ms = 0;   // the step the last walk order went to
+        uint32 probe_ms = 0;
+        uint8 no_route = 0;          // looks running that found no walking route to him
+    };
+    static std::unordered_map<uint64, Way> ways;
+    static std::unordered_map<uint64, Walker> walkers;
+    static uint32 next_ms = 0;
+    if (int32(now_ms - next_ms) < 0)
+        return;
+    next_ms = now_ms + 100u;
+    uint32 const game_ms = GameTime::GetGameTimeMS();
+    auto bot_by_low = [](uint64 low) { return ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(low)); };
+    auto stop = [&](uint64 low, Walker& w)
+    {
+        w.walk.active = false;
+        w.no_route = 0;
+        if (BotAI* ai = Services::Registry().ai(low))
+            ai->clear_owner_steps();
+    };
+    if (!Services::Config().behavior_follow_owner_steps())
+    {
+        for (auto& [low, w] : walkers)
+            if (w.walk.active)
+                stop(low, w);
+        ways.clear();
+        walkers.clear();
+        return;
+    }
+
+    std::unordered_set<uint64> seen_owners, seen_bots;
+    for (auto const& [guid, owner] : ObjectAccessor::GetPlayers())
+    {
+        if (!owner || !owner->IsInWorld() || !::Playerbot::Scenario::PlaysAsHuman(owner) || !owner->GetGroup())
+            continue;
+        Map const* omap = owner->GetMap();
+        if (!omap || omap->IsBattlegroundOrArena())
+            continue;
+        uint64 const owner_low = guid.GetCounter();
+        seen_owners.insert(owner_low);
+        Way& way = ways[owner_low];
+        if (way.map_id != omap->GetId() || way.instance_id != omap->GetInstanceId())
+        {
+            way.trail.Clear();
+            way.map_id = omap->GetId();
+            way.instance_id = omap->GetInstanceId();
+        }
+        // His own feet only: a taxi, a ship, a vehicle, a swim or a flying mount is no way a bot can copy step by step.
+        bool const usable = owner->IsAlive() && !owner->HasPlayerFlag(PLAYER_FLAGS_GHOST) && !owner->IsInFlight() && !owner->GetTransport() &&
+            !owner->GetVehicle() && !owner->IsInWater() && !owner->IsFlying() && !owner->IsBeingTeleported();
+        Fleet::TrailRecord(way.trail, owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ(), owner->IsFalling(), usable, now_ms);
+        Fleet::OwnerTrail const& trail = way.trail;
+        bool const owner_ok = usable && !owner->IsInCombat();
+
+        ForEachBotWithOwner(owner, [&](Player* bot)
+        {
+            uint64 const low = bot->GetGUID().GetCounter();
+            seen_bots.insert(low);
+            Walker& w = walkers[low];
+            BotAI* ai = Services::Registry().ai(low);
+            bool const same = bot->GetMap() == omap;
+            bool const own_movement = !ai || ai->holding_position(game_ms) || ai->follow_drop_committed(game_ms) ||
+                (ai->is_manual_mode(game_ms) && (ai->owner_command() == BotAI::OwnerCommand::Engage || ai->owner_command() == BotAI::OwnerCommand::Action)) ||
+                (same && omap->IsDungeon() && ai->dungeon_active());
+            bool const eligible = owner_ok && same && !own_movement && bot->IsAlive() && !bot->IsInCombat() && !bot->IsInFlight() &&
+                !bot->GetTransport() && !bot->GetVehicle() && !bot->IsBeingTeleported() && !bot->IsInWater();
+            if (!eligible)
+            {
+                if (w.walk.active)
+                {
+                    TC_LOG_INFO("playerbot.v2", "[owner_steps] {} stops walking {}'s way ({})", bot->GetName(), owner->GetName(),
+                                !owner_ok ? "he is in a fight, in the air or off his feet" : !bot->IsAlive() ? "dead" : bot->IsInCombat() ? "in combat" : "something else moves it");
+                    stop(low, w);
+                }
+                w.no_route = 0;
+                return;
+            }
+
+            if (w.walk.active)
+            {
+                Fleet::TrailReindex(trail, w.walk, w.next_step_ms);
+                Fleet::TrailStep target;
+                Fleet::TrailAction const action = w.walk.active
+                    ? Fleet::TrailStepFor(trail, w.walk, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), now_ms, target)
+                    : Fleet::TrailAction::Lost;
+                switch (action)
+                {
+                    case Fleet::TrailAction::Walk:
+                        if (w.issued_step_ms != target.ms || bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+                        {
+                            // His steps are a few yards apart and are where he ran: a straight move, as the navmesh has no link here.
+                            bot->GetMotionMaster()->MovePoint(0, target.x, target.y, target.z, /*generatePath*/ false);
+                            w.issued_step_ms = target.ms;
+                        }
+                        ai->hold_for_owner_steps(game_ms);
+                        break;
+                    case Fleet::TrailAction::Jump:
+                    {
+                        // His jump, from where he took off to where he came down, as long as he was in the air. Fall damage as the drop
+                        // takes it (Player::HandleFall over the height) when it lands.
+                        uint32 const air_ms = target.air_ms ? target.air_ms : 600u;
+                        float const sz = bot->GetPositionZ();
+                        Position dest = bot->GetPosition();
+                        dest.Relocate(target.x, target.y, target.z);
+                        bot->StopMoving();
+                        bot->SetFacingTo(std::atan2(target.y - bot->GetPositionY(), target.x - bot->GetPositionX()));
+                        bot->SetFallInformation(0, sz);
+                        bot->GetMotionMaster()->MoveJump(0, dest, Milliseconds(air_ms), /*minHeight*/ 0.5f, /*maxHeight*/ 4.0f);
+                        Player* const jp = bot;
+                        float const lx = target.x, ly = target.y, lz = target.z;
+                        jp->m_Events.AddEventAtOffset([jp, lx, ly, lz]()
+                        {
+                            if (!jp->IsInWorld() || !jp->IsAlive())
+                                return;
+                            jp->m_movementInfo.pos.Relocate(lx, ly, lz);
+                            jp->HandleFall();
+                        }, Milliseconds(air_ms + 50u));
+                        w.issued_step_ms = target.ms;
+                        ai->hold_for_owner_steps(game_ms);
+                        TC_LOG_INFO("playerbot.v2", "[owner_steps] {} jumps after {}: ({:.1f},{:.1f},{:.1f}) -> ({:.1f},{:.1f},{:.1f}) in {} ms",
+                                    bot->GetName(), owner->GetName(), bot->GetPositionX(), bot->GetPositionY(), sz, target.x, target.y, target.z, air_ms);
+                        break;
+                    }
+                    case Fleet::TrailAction::Wait:
+                        ai->hold_for_owner_steps(game_ms);
+                        break;
+                    case Fleet::TrailAction::Done:
+                        TC_LOG_INFO("playerbot.v2", "[owner_steps] {} came up {}'s way to ({:.0f},{:.0f},{:.0f}): the follow takes it from here",
+                                    bot->GetName(), owner->GetName(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+                        stop(low, w);
+                        break;
+                    default:
+                        TC_LOG_INFO("playerbot.v2", "[owner_steps] {} lost {}'s way at ({:.0f},{:.0f},{:.0f}): the catch-up brings it if it stays stuck",
+                                    bot->GetName(), owner->GetName(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+                        bot->StopMoving();
+                        stop(low, w);
+                        w.probe_ms = now_ms + 3000u;   // not straight back onto the way it just fell off
+                        break;
+                }
+                w.next_step_ms = w.walk.active && w.walk.next < trail.steps.size() ? trail.steps[w.walk.next].ms : 0u;
+                return;
+            }
+
+            // Not walking: is there a walking route to him? Looked at once a second, and only when he is a way off or on another level.
+            if (int32(now_ms - w.probe_ms) < 0)
+                return;
+            w.probe_ms = now_ms + 1000u;
+            float const gap = bot->GetExactDist(owner);
+            if (trail.steps.size() < 2 || gap < 4.0f)
+            {
+                w.no_route = 0;
+                return;
+            }
+            PathGenerator pg(bot);
+            ::Playerbot::BotMovement::SehSafeCalculatePath(pg, owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ());
+            PathType const type = pg.GetPathType();
+            G3D::Vector3 const& end = pg.GetActualEndPosition();
+            float const ex = end.x - owner->GetPositionX(), ey = end.y - owner->GetPositionY(), ez = end.z - owner->GetPositionZ();
+            bool const unreachable = (type & (PATHFIND_NOPATH | PATHFIND_SHORTCUT)) ||
+                ((type & PATHFIND_INCOMPLETE) && std::sqrt(ex * ex + ey * ey + ez * ez) > 4.0f);
+            if (!unreachable)
+            {
+                w.no_route = 0;
+                return;
+            }
+            if (++w.no_route < 2)
+                return;
+            // Where it stands on his way, by a step it can walk to straight (not the steps on top of the ledge above it).
+            int const join = Fleet::TrailJoin(trail, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), [&](Fleet::TrailStep const& s)
+            {
+                PathGenerator sp(bot);
+                ::Playerbot::BotMovement::SehSafeCalculatePath(sp, s.x, s.y, s.z);
+                if (sp.GetPathType() != PATHFIND_NORMAL)
+                    return false;
+                float const straight = bot->GetExactDist(Position(s.x, s.y, s.z));
+                return sp.GetPathLength() <= straight * 1.5f + 3.0f;
+            });
+            if (join < 0)
+                return;
+            Fleet::TrailBegin(trail, w.walk, join, now_ms);
+            if (!w.walk.active)
+                return;
+            w.next_step_ms = trail.steps[w.walk.next].ms;
+            w.issued_step_ms = 0;
+            bot->StopMoving();
+            bot->GetMotionMaster()->Clear();
+            ai->hold_for_owner_steps(game_ms);
+            uint32 jumps = 0;
+            for (size_t i = size_t(join) + 1; i < trail.steps.size(); ++i)
+                jumps += trail.steps[i].jump ? 1u : 0u;
+            TC_LOG_INFO("playerbot.v2", "[owner_steps] {} has no walking route to {} ({:.0f} y off): takes his way from ({:.0f},{:.0f},{:.0f}), {} step(s), {} jump(s)",
+                        bot->GetName(), owner->GetName(), gap, trail.steps[join].x, trail.steps[join].y, trail.steps[join].z,
+                        uint32(trail.steps.size() - size_t(join)), jumps);
+        });
+    }
+    for (auto it = ways.begin(); it != ways.end();)
+        it = seen_owners.count(it->first) ? std::next(it) : ways.erase(it);
+    for (auto it = walkers.begin(); it != walkers.end();)
+    {
+        if (seen_bots.count(it->first)) { ++it; continue; }
+        if (it->second.walk.active)
+        {
+            if (Player* b = bot_by_low(it->first); b && b->IsInWorld())
+                b->StopMoving();
+            stop(it->first, it->second);
+        }
+        it = walkers.erase(it);
+    }
+}
+
 void Module::OnWorldUpdate(std::chrono::milliseconds diff)
 {
     if (!initialized_) return;
@@ -1165,7 +1653,38 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
             SendDueAddonHints();
         }
     }
+    {
+        // A raid of a player and companions that fits a party again goes back to one (BotGroupRules::RevertBotRaidToParty).
+        static std::chrono::milliseconds last_raid_check{0};
+        if (total - last_raid_check >= std::chrono::milliseconds(5000))
+        {
+            last_raid_check = total;
+            std::vector<Group*> to_party;
+            for (auto const& [guid, p] : ObjectAccessor::GetPlayers())
+            {
+                Group* g = p ? p->GetGroup() : nullptr;
+                if (!g || !g->isRaidGroup() || p->GetSession()->IsBot() || std::ranges::find(to_party, g) != to_party.end())
+                    continue;
+                bool any_bot = false, any_on_raid_map = false;
+                for (GroupReference const& ref : g->GetMembers())
+                {
+                    Player const* m = ref.GetSource();
+                    any_bot = any_bot || m->GetSession()->IsBot();
+                    any_on_raid_map = any_on_raid_map || (m->GetMap() && m->GetMap()->IsRaid());
+                }
+                if (BotGroupRules::RevertBotRaidToParty(true, g->isBGGroup() || g->isBFGroup() || g->isLFGGroup(), g->GetMembersCount(),
+                    MAX_GROUP_SIZE, any_bot, true, any_on_raid_map))
+                    to_party.push_back(g);
+            }
+            for (Group* g : to_party)
+            {
+                TC_LOG_INFO("playerbot.v2", "[raid_to_party] leader={} members={}", g->GetLeaderName(), g->GetMembersCount());
+                g->ConvertToGroup();
+            }
+        }
+    }
     ::Playerbot::Diagnostics::Scenario::Tick(std::uint32_t(diff.count()));   // bot scenario tests (.playerbot scenario)
+    BotChatModel::DeliverReplies(GameTime::GetGameTimeMS());               // Playerbot.ChatModel replies that came back
 
     // [cast_state] (playtest, WSG start room 2026-10-11: a healer stood with the casting animation on while casting nothing). Twice a
     // second, every bot in a battleground: a line when the spell it is casting changes (spell id, generic or channel, 0 = none), and a
@@ -1789,10 +2308,12 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
         // build/group sub-buckets non-overlapping, as in the serial path).
         const uint32 group_ms_before = t_group_build_ms;
         // Companion tank threat multiplier (UpdateTankThreatMultiplier); 1.0 disables.
-        const float tank_threat_mult = std::clamp(
-            float(sConfigMgr->GetFloatDefault("Playerbot.TankThreatMultiplier", 3.0f, true)), 1.0f, 10.0f);
-        const float dps_threat_mult = std::clamp(
-            float(sConfigMgr->GetFloatDefault("Playerbot.DpsThreatMultiplier", 1.0f, true)), 0.3f, 1.5f);
+        TankThreatSettings threat_cfg;
+        threat_cfg.tank = std::clamp(float(sConfigMgr->GetFloatDefault("Playerbot.TankThreatMultiplier", 3.0f, true)), 1.0f, 10.0f);
+        threat_cfg.raid_tank = std::clamp(float(sConfigMgr->GetFloatDefault("Playerbot.Raid.TankThreatMultiplier", 5.0f, true)), 1.0f, 10.0f);
+        threat_cfg.dps = std::clamp(float(sConfigMgr->GetFloatDefault("Playerbot.DpsThreatMultiplier", 1.0f, true)), 0.3f, 1.5f);
+        threat_cfg.sure_taunt = sConfigMgr->GetBoolDefault("Playerbot.Raid.SureTaunt", true, true);
+        threat_cfg.scenario_as_owned = sConfigMgr->GetBoolDefault("Playerbot.Scenario.OwnerThreat", true, true);
         ConfigReader::CastPacing const cast_pacing_cfg = Services::Config().cast_pacing();
         uint32 const pvp_floor_ms = Services::Config().pacing().pvp_reaction_delay_ms;
         bool const wake_on_gcd = sConfigMgr->GetBoolDefault("Playerbot.Reaction.WakeOnGcd", true, true);
@@ -1995,7 +2516,7 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
             }
             t_group_build_ms += getMSTimeDiff(group_t0, getMSTime());
 
-            UpdateTankThreatMultiplier(id, p, bs.ai, *snap, tank_threat_mult, dps_threat_mult);
+            UpdateTankThreatMultiplier(id, p, bs.ai, *snap, threat_cfg);
             UpdateCastSpeed(p, *snap, cast_pacing_cfg);
             UpdatePvpFloor(id, p, *snap, pvp_floor_ms, total);
 
@@ -2025,6 +2546,7 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
         TopUpPendingLfg(getMSTime());
         Playerbot::V2::LfgTick(getMSTime());
         Playerbot::V2::LfgBotGroupsTick(getMSTime());
+        Playerbot::V2::DungeonFinderTick(getMSTime());
         t_bgport_ms = getMSTimeDiff(t0, getMSTime());
     }
 
@@ -2057,6 +2579,11 @@ void Module::OnWorldUpdate(std::chrono::milliseconds diff)
 
     // 2.7. Pets that cannot walk to their bot owner are set down next to it.
     DrivePetSnap(getMSTime());
+
+    // 2.8. Bots board their player's flight, and a bot with no way to him is set down beside him (Fleet/OwnerCatchUp.h).
+    DriveFlyWithOwner(getMSTime());
+    DriveOwnerCatchUp(getMSTime());
+    DriveOwnerTrail(getMSTime());
 
     // 2b. Bot guild manager tick (GUILD_PLAN.md Phase A.2). Internally
     //     60s rate-limited; cheap to call every frame. Elects founders
@@ -2583,6 +3110,34 @@ void Module::OnPlayerLogin(Player* p)
     if (!initialized_ || !p) return;
     const BotId id = p->GetGUID().GetCounter();
 
+    // A person logging into a marked character with the game client is never driven by the bot logic (Session/HumanLogin.h):
+    // an alt once summoned into the party stayed marked and the bot logic fought its player for control (Discord report, 2026-10-27).
+    {
+        WorldSession const* sess = p->GetSession();
+        bool const headless = !sess || sess->IsBot();
+        bool const marked = Services::Lifecycle().is_bot(id);
+        bool const on_pool = marked && !headless && Services::Accounts().is_pool_account(sess->GetAccountId());
+        HumanLoginAction const action = HumanClientAction(marked, headless, on_pool);
+        if (action != HumanLoginAction::None)
+        {
+            if (Services::Registry().has(id))
+            {
+                Services::Scheduler().unregister_bot(id);
+                Services::Snapshots().remove(id);
+                Services::Registry().unregister_bot(id);
+            }
+            if (action == HumanLoginAction::Release)
+            {
+                Services::Lifecycle().unmark_as_bot(id);
+                Services::Owners().ClearOwner(id);
+            }
+            else
+                Services::Lifecycle().unmark_as_bot_transient(id);
+            TC_LOG_INFO("playerbot.v2", "[human_login] {} logged in with the game client while marked as a bot: {}",
+                p->GetName(), action == HumanLoginAction::Release ? "unmarked and unbound" : "no bot logic this login (pool character)");
+        }
+    }
+
     // Real players are not driven by V2 but DO get owner-login greetings
     // from any of their currently-online bots. Bots queue a one-shot
     // WhisperIntent (executed on the next world-thread drain) so real
@@ -2847,6 +3402,16 @@ void Module::OnPlayerLogin(Player* p)
                 p->GetName(), id, uint32(p->GetClass()), uint32(p->GetRace()), uint32(p->GetLevel()));
 }
 
+// A deleted character keeps no bot mark or owner: the mark would ask for a login of a character that is gone.
+void Module::OnPlayerDeleted(uint64 guid_low)
+{
+    if (!initialized_) return;
+    BotId const id = guid_low;
+    if (!Services::Lifecycle().is_bot(id)) return;
+    Services::Lifecycle().unmark_as_bot(id);
+    Services::Owners().ClearOwner(id);
+}
+
 void Module::OnPlayerLogout(Player* p)
 {
     if (!initialized_ || !p) return;
@@ -2855,6 +3420,13 @@ void Module::OnPlayerLogout(Player* p)
     {
         Services::Owners().NoteOwnerCharacterOffline(sess->GetAccountId(), id);
         g_addon_hints.Logout(id);
+        // Self-bot ends with the session: left marked, the character would be logged in as a bot with its group at the next login.
+        bool const marked = Services::Lifecycle().is_bot(id);
+        if (HumanClientAction(marked, false, marked && Services::Accounts().is_pool_account(sess->GetAccountId())) == HumanLoginAction::Release)
+        {
+            Services::Lifecycle().unmark_as_bot(id);
+            Services::Owners().ClearOwner(id);
+        }
     }
     if (!Services::Registry().has(id)) return;     // not one of ours
     // Speak queued chat (the `.bot dismiss` goodbye) while the bot is still in the world.
@@ -3220,6 +3792,12 @@ void Module::OnGuildChat(Player* sender, uint64 guild_id, std::string const& msg
     BotChatReactor::ReactGuild(sender, guild_id, msg);
 }
 
+void Module::OnChannelChat(Player* sender, Channel* channel, std::string const& msg)
+{
+    if (!initialized_ || !sender || !channel || msg.empty()) return;
+    V2::ChannelChat::OnPlayerLine(sender, channel, msg);
+}
+
 void Module::OnSayChat(Player* sender, std::string const& msg)
 {
     // SC-P1a: a real player spoke in /say. Let the reactor pick at most one
@@ -3354,6 +3932,14 @@ void Module::RouteGroupOrder(Player* sender, Group* group, std::string order)
 {
     uint32 const account = sender->GetSession() ? sender->GetSession()->GetAccountId() : 0;
     if (account == 0)
+        return;
+    // Typed crowd-control orders ("cc off", "no fear") that reach here: the add-on's transport, or a party "cc off" (always a group
+    // order) from a player who commands no bot in the group. The panel's "crowdcontrol on|off" is not one and goes on below.
+    if (BotCommandParser::ApplyCcOrder(sender, order, "group"))
+        return;
+    if (BotCommandParser::ApplyIgnoreOrder(sender, order, "group"))
+        return;
+    if (BotCommandParser::ApplyPlaceOrder(sender, order, "group"))
         return;
     if (order.rfind("crowdcontrol ", 0) == 0 || order.rfind("crowd control ", 0) == 0 || order == "cc on" || order == "cc off")
     {
@@ -3514,6 +4100,20 @@ void Module::RouteGroupOrder(Player* sender, Group* group, std::string order)
 void Module::OnAddonOrder(Player* sender, Group* group, std::string const& prefix, std::string const& text)
 {
     if (!initialized_ || !sender || !group) return;
+    // What the add-on sends to itself goes over the group channel when grouped: client 70658's add-on whispers
+    // (CMSG_CHAT_ADDON_MESSAGE_TARGETED) never reach the whisper hooks (live 2026-10-28, RC5/RC6), its group add-on messages do.
+    // The bot manager's PBC frames and the queued ".bot ..." lines are the sender's own, never orders for the group.
+    if (prefix == AddonControl::kPrefix)
+    {
+        if (WorldSession* session = sender->GetSession(); session && !session->IsBot())
+            AddonControl::OnAddonWhisper(sender, sender, prefix, text);
+        return;
+    }
+    if (prefix == kAddonOrderPrefix && (text == kAddonHelloText || IsAddonBotCommand(text)))
+    {
+        OnAddonWhisper(sender, sender, prefix, text);
+        return;
+    }
     auto const order = ClassifyAddonOrder(prefix, text, Services::Config().behavior_owner_commands());
     if (!order) return;
     TC_LOG_INFO("playerbot.v2", "[addon_order] {} -> '{}'", sender->GetName(), *order);
@@ -3585,12 +4185,23 @@ void Module::OnAddonWhisper(Player* sender, Player* receiver, std::string const&
         NoteAddonHello(sender);
         return;
     }
+    // A ".bot ..." command the add-on could not say (sent from a timer): run it as if the player had typed it.
+    if (initialized_ && sender && sender == receiver && prefix == kAddonOrderPrefix && IsAddonBotCommand(text))
+    {
+        if (WorldSession* session = sender->GetSession(); session && !session->IsBot())
+        {
+            NoteAddonHello(sender);
+            TC_LOG_INFO("playerbot.v2", "[addon_command] {}: {}", sender->GetName(), text);
+            ChatHandler(session).ParseCommands(text);
+        }
+        return;
+    }
     if (!initialized_ || !sender || !receiver || text.empty() || prefix != kAddonOrderPrefix) return;
     TC_LOG_INFO("playerbot.v2", "[addon_whisper] {} -> {}", sender->GetName(), receiver->GetName());
     OnWhisperReceived(sender, receiver, text);
 }
 
-void Module::OnPartyChat(Player* sender, Group* group, std::string const& msg)
+void Module::OnPartyChat(Player* sender, Group* group, std::string const& msg, bool raid_chat)
 {
     // Squad-chat command surface. Only messages prefixed with `;` are
     // routed; every other party-chat line is ignored so we don't spam
@@ -3609,6 +4220,18 @@ void Module::OnPartyChat(Player* sender, Group* group, std::string const& msg)
     BotChatReactor::React(sender, group, msg);
     if (msg.front() != ';')
     {
+        // The owner's crowd-control orders ("no fear", "@warlock no fear", "@mages no sheep", "off cc"): stored once for the
+        // sender, answered once, from a player who commands a bot in this group (anyone else's "no fear" stays chatter).
+        if (CcDeny::ParseOrder(msg))
+        {
+            bool commands_a_bot = false;
+            for (GroupReference const& itr : group->GetMembers())
+                if (Player const* m = itr.GetSource(); m && m != sender && Services::Registry().has(m->GetGUID().GetCounter()) &&
+                                                       BotCommandParser::ControlsForGroupOrder(sender, m))
+                { commands_a_bot = true; break; }
+            if (commands_a_bot && BotCommandParser::ApplyCcOrder(sender, msg, "party"))
+                return;
+        }
         // A bare group order ("follow", "stay", ...) in party or raid chat goes to every bot of the sender's in the
         // group. A line that starts with the name of a bot in the group, or with "all", is that bot's (every bot's)
         // order without the ';' ("Lentha use altar", "all use altar"). Other chatter stays ignored.
@@ -3616,6 +4239,8 @@ void Module::OnPartyChat(Player* sender, Group* group, std::string const& msg)
             RouteGroupOrder(sender, group, *order);
         else if (auto const addressed = AddressedGroupOrder(msg, [group](std::string_view name) { return GroupHasBotNamed(group, name); }))
             DispatchSquadLine(sender, group, *addressed, false);
+        else
+            BotChatReactor::ReactPartyModel(sender, group, msg, raid_chat);   // Playerbot.ChatModel (no-op when off)
         return;
     }
     const std::string body = msg.substr(1);
@@ -3699,6 +4324,48 @@ void Module::DispatchSquadLine(Player* sender, Group* group, std::string const& 
     }
 }
 
+void Module::OnHumanArenaQueue(Player* player, BattlegroundTemplate const* tmpl, uint8 bracket)
+{
+    // Only a real party asks for opponents; a bot party queuing for an arena is the opponent.
+    if (!player || !player->GetSession() || player->GetSession()->IsBot() || !Services::Initialized())
+        return;
+    if (!sConfigMgr->GetBoolDefault("Playerbot.Arena.BotOpponents", true))
+        return;
+    if (tmpl->MapIDs.empty())
+        return;
+
+    // team size of the queue the party just joined (2, 3 or 5)
+    uint8 teamSize = 0;
+    for (uint32 i = 0; i < PLAYER_MAX_BATTLEGROUND_QUEUES; ++i)
+    {
+        BattlegroundQueueTypeId const q = player->GetBattlegroundQueueTypeId(i);
+        if (q.BattlemasterListId == uint16(tmpl->Id) && q.Type == uint8(BattlegroundQueueIdType::Arena) && q.TeamSize)
+            teamSize = q.TeamSize;
+    }
+    if (teamSize != 2 && teamSize != 3 && teamSize != 5)
+        return;
+
+    PVPDifficultyEntry const* diff = DB2Manager::GetBattlegroundBracketById(tmpl->MapIDs.front(), BattlegroundBracketId(bracket));
+    if (!diff)
+        return;
+
+    // Opponents of the other faction, in the party's level bracket. BotGroupBuilder takes idle, ungrouped bots of that band, forms
+    // the party and its leader queues the same Arena queue (team size, rating 1) about 10 s later; the queue then matches the two.
+    V2::CoordEvent ev{};
+    ev.kind         = V2::CoordSignal::ArenaTeamForming;
+    ev.origin_low   = player->GetGUID().GetCounter();
+    ev.content_id   = uint32(tmpl->Id);
+    ev.level_min    = uint8(std::clamp<int32>(diff->MinLevel, 1, int32(MaxPlayerLevel())));
+    ev.level_max    = uint8(std::clamp<int32>(diff->MaxLevel, 1, int32(MaxPlayerLevel())));
+    ev.faction_mask = player->GetTeam() == ALLIANCE ? 0x2 : 0x1;
+    ev.arena_type   = teamSize;
+    ev.content_name = "Arena opponents";
+    Services::Coordination().Publish(ev);
+
+    TC_LOG_INFO("playerbot.v2", "[arena] {} queued {}v{} (bracket {}-{}): asked for a bot team of the other faction",
+                player->GetName(), uint32(teamSize), uint32(teamSize), uint32(ev.level_min), uint32(ev.level_max));
+}
+
 void Module::OnPlayerJoinedBgQueue(Player* player, uint32 bg_type_id, uint8 bracket)
 {
     if (!initialized_ || !player) return;
@@ -3714,6 +4381,15 @@ void Module::OnPlayerJoinedBgQueue(Player* player, uint32 bg_type_id, uint8 brac
         if (!g || g->GetLeaderGUID() != player->GetGUID())
             return;
         // fall through: bot premade leader — fill both factions below
+    }
+
+    // Arena (2v2 / 3v3): the party is one team; the opposing team is a bot party formed for it. The battleground fill below
+    // fills two sides with solo bots and does not fit an arena queue.
+    if (BattlegroundTemplate const* tmpl = sBattlegroundMgr->GetBattlegroundTemplateByTypeId(BattlegroundTypeId(bg_type_id));
+        tmpl && tmpl->IsArena())
+    {
+        OnHumanArenaQueue(player, tmpl, bracket);
+        return;
     }
 
     // A real player waiting for a place: MakeRoomForRealPlayers watches the wait.
@@ -3904,6 +4580,17 @@ void Module::OnPlayerJoinedLfg(Player* player, uint32 dungeon_id, uint8 /*role_m
     }
 }
 
+namespace
+{
+// The invite hook passes the battleground's own type, not its queue. BattlegroundMgr::GetBattleground finds the instance through the
+// queue's BattlemasterListId only, so a queue id built from that type reaches the same instance.
+Battleground* FindInvitedBattleground(uint32 bg_instance_id, uint32 bg_type_id)
+{
+    return sBattlegroundMgr->GetBattleground(bg_instance_id,
+        BattlegroundMgr::BGQueueTypeId(uint16(bg_type_id), BattlegroundQueueIdType::Battleground, false, 0));
+}
+}
+
 void Module::OnBGInvitationReceived(Player* player, uint32 bg_instance_id, uint32 bg_type_id)
 {
     // Synchronous handler fired from BattlegroundQueue::InviteGroupToBG /
@@ -4007,7 +4694,7 @@ void Module::FireDueBgPorts()
             {
                 // A human of this type is queued and not invited yet: TC's prep timer starts with the first player inside, so
                 // bots going in now would burn the human's wait. Hold until the human has an invitation (80 s expiry above).
-                if (Battleground const* held_bg = sBattlegroundMgr->GetBattleground(it->bg_instance_id, BattlegroundTypeId(it->bg_template_type_id)))
+                if (Battleground const* held_bg = FindInvitedBattleground(it->bg_instance_id, it->bg_template_type_id))
                     if (Fleet::BotQueueFiller::HasWaitingHuman(it->bg_template_type_id, uint8(held_bg->GetBracketId())))
                     {
                         ++it;
@@ -4028,9 +4715,7 @@ void Module::FireDueBgPorts()
             // Once flagged sticky, the gate stays open for that instance.
             if (!human_in_bg)
             {
-                Battleground* bg = sBattlegroundMgr->GetBattleground(
-                    it->bg_instance_id,
-                    BattlegroundTypeId(it->bg_template_type_id));
+                Battleground* bg = FindInvitedBattleground(it->bg_instance_id, it->bg_template_type_id);
                 if (bg)
                 {
                     for (auto const& [guid, _] : bg->GetPlayers())

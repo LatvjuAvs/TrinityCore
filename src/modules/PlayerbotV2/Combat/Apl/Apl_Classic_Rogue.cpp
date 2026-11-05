@@ -126,7 +126,7 @@ bool UnengagedVictim(ApPredicateContext const& ctx)
 
 bool ShouldStealth(ApPredicateContext const& ctx)
 {
-    if (ctx.bot.in_combat() || Stealthed(ctx) || ctx.bot.is_mounted() || !UnengagedVictim(ctx) || !Ready(ctx, STEALTH))
+    if (ctx.bot.in_combat() || Stealthed(ctx) || ctx.bot.is_mounted() || ctx.bot.owner_stealth_off() || !UnengagedVictim(ctx) || !Ready(ctx, STEALTH))
         return false;
     float const d = DistTo(ctx, *ctx.bot.victim_info());
     return d > 8.f && d < 40.f;

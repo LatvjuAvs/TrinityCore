@@ -29,6 +29,7 @@
 #include "WorldSession.h"
 
 void AddSC_playerbot_v2_commandscript();
+void AddSC_playerbot_v2_hire_broker();
 
 namespace
 {
@@ -41,7 +42,7 @@ bool IsHuman(Player const* player)
 
 // PathGenerator::LiquidRouteCheck: a bot in a capital keeps out of canals (module liquid policy, PathLiquid.h). Sampling is along
 // the whole path, not only its corners.
-bool BotPathTouchesAvoidedLiquid(WorldObject const* source, Movement::PointsArray const& path)
+bool BotPathTouchesAvoidedLiquid(WorldObject const* source, Movement::PointsArray const& path, bool waterPolys)
 {
     using namespace Playerbot::BotMovement;
     if (!g_LiquidPathPolicy)
@@ -51,6 +52,9 @@ bool BotPathTouchesAvoidedLiquid(WorldObject const* source, Movement::PointsArra
         return false;
     if (g_LiquidPathPolicy(player) == LiquidPolicy::None)
         return false;
+    // The navmesh marks its own water polygons; the point probe below can miss them (Stormwind's canal water lies level with the quay).
+    if (waterPolys)
+        return true;
     std::vector<PathPoint> pts;
     pts.reserve(path.size());
     for (G3D::Vector3 const& v : path)
@@ -113,6 +117,11 @@ public:
     void OnLogout(Player* player) override
     {
         Module::instance().OnPlayerLogout(player);
+    }
+
+    void OnDelete(ObjectGuid guid, uint32 /*accountId*/) override
+    {
+        Module::instance().OnPlayerDeleted(guid.GetCounter());
     }
 
     // Raid mana ledger: what a cast cost (the core's own figure, taken when the cast completes) and what a mana potion, rune or
@@ -187,6 +196,14 @@ public:
             Module::instance().OnYellChat(player, msg);
     }
 
+    // General, Trade and LookingForGroup: world bots answer a player's LFM / LFG / WTB line or question. Read only, before the
+    // line is sent; the answers come a few seconds later.
+    void OnChat(Player* player, uint32 type, uint32 /*lang*/, std::string& msg, Channel* channel) override
+    {
+        if (type == CHAT_MSG_CHANNEL && channel)
+            Module::instance().OnChannelChat(player, channel, msg);
+    }
+
     void OnChatSent(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string const& msg, Player* receiver) override
     {
         Module::instance().OnWhisperReceived(player, receiver, msg);
@@ -199,11 +216,13 @@ public:
         {
             case CHAT_MSG_PARTY:
             case CHAT_MSG_PARTY_LEADER:
-            case CHAT_MSG_RAID:
-            case CHAT_MSG_RAID_LEADER:
             case CHAT_MSG_INSTANCE_CHAT:
             case CHAT_MSG_INSTANCE_CHAT_LEADER:
-                Module::instance().OnPartyChat(player, group, msg);
+                Module::instance().OnPartyChat(player, group, msg, /*raid_chat=*/false);
+                break;
+            case CHAT_MSG_RAID:
+            case CHAT_MSG_RAID_LEADER:
+                Module::instance().OnPartyChat(player, group, msg, /*raid_chat=*/true);
                 break;
             default:
                 break;
@@ -387,6 +406,7 @@ void AddSC_playerbot_v2()
     new playerbot_v2_group();
     new playerbot_v2_guild();
     AddSC_playerbot_v2_commandscript();
+    AddSC_playerbot_v2_hire_broker();
 
     PathGenerator::SetLiquidRouteCheck(&BotPathTouchesAvoidedLiquid);
 }
